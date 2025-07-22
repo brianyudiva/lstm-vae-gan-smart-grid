@@ -176,3 +176,6 @@ Solve
 */
 
 New Generator.PV675 Phases=3 Bus1=675 kV=0.48 kW=150 kvar=0 Model=1 Vminpu=0.95 Vmaxpu=1.05
+New Generator.PV633 Phases=3 Bus1=633 kV=0.48 kW=150 kvar=0 Model=1 Vminpu=0.95 Vmaxpu=1.05
+New Generator.PV692 Phases=3 Bus1=692 kV=0.48 kW=150 kvar=0 Model=1 Vminpu=0.95 Vmaxpu=1.05
+

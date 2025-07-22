@@ -1,0 +1,23 @@
+2025-07-22 20:22:44.112057: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2025-07-22 20:22:45.409989: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+Traceback (most recent call last):
+  File "C:\Users\brian\Documents\Project\train_hyper_minimal.py", line 5, in <module>
+    import tensorflow as tf
+  File "C:\Users\brian\anaconda3\envs\smartgrid\lib\site-packages\tensorflow\__init__.py", line 49, in <module>
+    from tensorflow._api.v2 import __internal__
+  File "C:\Users\brian\anaconda3\envs\smartgrid\lib\site-packages\tensorflow\_api\v2\__internal__\__init__.py", line 11, in <module>
+    from tensorflow._api.v2.__internal__ import distribute
+  File "C:\Users\brian\anaconda3\envs\smartgrid\lib\site-packages\tensorflow\_api\v2\__internal__\distribute\__init__.py", line 8, in <module>
+    from tensorflow._api.v2.__internal__.distribute import combinations
+  File "C:\Users\brian\anaconda3\envs\smartgrid\lib\site-packages\tensorflow\_api\v2\__internal__\distribute\combinations\__init__.py", line 11, in <module>
+    from tensorflow.python.distribute.strategy_combinations import central_storage_strategy_with_gpu_and_cpu # line: 669
+  File "C:\Users\brian\anaconda3\envs\smartgrid\lib\site-packages\tensorflow\python\distribute\strategy_combinations.py", line 21, in <module>
+    from tensorflow.python.distribute import central_storage_strategy
+  File "<frozen importlib._bootstrap>", line 1027, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1006, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 688, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 879, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 1012, in get_code
+  File "<frozen importlib._bootstrap_external>", line 672, in _compile_bytecode
+KeyboardInterrupt
+^C
