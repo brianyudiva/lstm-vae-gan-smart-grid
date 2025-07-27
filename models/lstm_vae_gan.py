@@ -234,7 +234,7 @@ def build_ultra_compact_lstm_vae_gan(input_shape, latent_dim=2):
 
 
 # === MODEL SELECTION HELPER ===
-def select_architecture(normal_samples_count, input_shape, latent_dim=8):
+def select_architecture(normal_samples_count, input_shape, latent_dim=8, force_architecture=None):
     """
     Automatically select the best architecture based on data size
     
@@ -242,12 +242,45 @@ def select_architecture(normal_samples_count, input_shape, latent_dim=8):
         normal_samples_count: Number of normal training samples
         input_shape: Shape of input sequences (seq_length, features)
         latent_dim: Latent space dimension
+        force_architecture: Force a specific architecture ('regular', 'compact', 'ultra_compact')
         
     Returns:
         encoder, decoder, discriminator, architecture_info
     """
     
-    if normal_samples_count >= 5000:
+    # Force specific architecture if requested
+    if force_architecture == 'ultra_compact':
+        print(f"🏗️ FORCED: ULTRA-COMPACT architecture ({normal_samples_count} samples)")
+        encoder, decoder, discriminator = build_ultra_compact_lstm_vae_gan(input_shape, latent_dim//2)
+        info = {
+            'name': 'ultra_compact',
+            'recommended_lr': 5e-5,
+            'kl_weight': 50.0,
+            'recon_weight': 10000.0,
+            'adv_weight': 0.0
+        }
+    elif force_architecture == 'compact':
+        print(f"🏗️ FORCED: COMPACT architecture ({normal_samples_count} samples)")
+        encoder, decoder, discriminator = build_lstm_vae_gan_compact(input_shape, latent_dim)
+        info = {
+            'name': 'compact',
+            'recommended_lr': 1e-4,
+            'kl_weight': 10.0,
+            'recon_weight': 1000.0,
+            'adv_weight': 0.1
+        }
+    elif force_architecture == 'regular':
+        print(f"🏗️ FORCED: REGULAR architecture ({normal_samples_count} samples)")
+        encoder, decoder, discriminator = build_lstm_vae_gan(input_shape, latent_dim)
+        info = {
+            'name': 'regular',
+            'recommended_lr': 2e-4,
+            'kl_weight': 1.0,
+            'recon_weight': 100.0,
+            'adv_weight': 1.0
+        }
+    # Automatic selection based on data size
+    elif normal_samples_count >= 5000:
         print(f"🏗️ Selected: REGULAR architecture ({normal_samples_count} samples)")
         encoder, decoder, discriminator = build_lstm_vae_gan(input_shape, latent_dim)
         info = {

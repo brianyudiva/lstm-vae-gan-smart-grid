@@ -11,6 +11,13 @@ def reconstruction_loss(y_true, y_pred):
     """Standard MSE reconstruction loss for regular model"""
     return tf.reduce_mean(tf.square(y_true - y_pred))
 
+def contrastive_reconstruction_loss(y_true, y_pred, margin=0.01):
+    """Enhanced reconstruction loss that penalizes high reconstruction errors"""
+    mse = tf.reduce_mean(tf.square(y_true - y_pred), axis=[1, 2])
+    # Penalize reconstruction errors above margin more heavily
+    penalty = tf.maximum(0.0, mse - margin) * 100.0
+    return tf.reduce_mean(mse + penalty)
+
 def compute_anomaly_scores(encoder, decoder, X_test, X_train_normal, threshold_percentile=95):
     """Compute anomaly scores with proper threshold from training data"""
     # Get test reconstruction errors
@@ -75,11 +82,12 @@ except:
 input_shape = (X_train_normal.shape[1], X_train_normal.shape[2])
 print(f"Input shape: {input_shape}")
 
-# Automatically select the best architecture based on data size
+# Force ultra-compact architecture for better generalization
 encoder, decoder, discriminator, arch_info = select_architecture(
     normal_samples_count=len(X_train_normal),
     input_shape=input_shape,
-    latent_dim=8  # Will be adjusted automatically for ultra-compact
+    latent_dim=4,  # Reduced from 8
+    force_architecture='ultra_compact'  # Force the simplest model
 )
 
 print(f"\n🎯 Selected architecture: {arch_info['name'].upper()}")
@@ -88,37 +96,41 @@ print(f"\n🎯 Selected architecture: {arch_info['name'].upper()}")
 use_discriminator = discriminator is not None
 print(f"Using discriminator: {use_discriminator}")
 
-# === COMPILE MODELS WITH RECOMMENDED HYPERPARAMETERS ===
-# Use architecture-specific hyperparameters
-initial_lr = arch_info['recommended_lr']
-kl_weight = arch_info['kl_weight']
-recon_weight = arch_info['recon_weight']
-adv_weight = arch_info['adv_weight']
+# === COMPILE MODELS WITH ULTRA-AGGRESSIVE HYPERPARAMETERS ===
+# Use ultra-aggressive hyperparameters for maximum separation
+initial_lr = 0.0001  # Much lower learning rate for stability
+kl_weight = 0.001    # Extremely low KL weight - focus entirely on reconstruction
+recon_weight = 10000 # Massively increased reconstruction weight
+adv_weight = 0.0     # No adversarial loss for ultra-compact
 
-print(f"\n🎛️ TRAINING CONFIGURATION:")
+print(f"\n🎛️ ULTRA-AGGRESSIVE TRAINING CONFIGURATION:")
 print(f"Learning rate: {initial_lr}")
 print(f"Loss weights - KL: {kl_weight}, Recon: {recon_weight}, Adv: {adv_weight}")
+print(f"🎯 FOCUS: Maximum reconstruction accuracy for normal data")
 
 generator_optimizer = tf.keras.optimizers.Adam(initial_lr)
+# Add learning rate decay for better convergence
+lr_decay_factor = 0.95
+lr_decay_patience = 10
 if use_discriminator:
     discriminator_optimizer = tf.keras.optimizers.Adam(initial_lr)
     bce = tf.keras.losses.BinaryCrossentropy(from_logits=False)
 
 # === TRAINING PARAMETERS ===
-batch_size = 32
+batch_size = 16      # Smaller batch size for better gradients
 epochs = 100
 steps_per_epoch = X_train_normal.shape[0] // batch_size
 
 # Adjust training parameters based on architecture
 if arch_info['name'] == 'ultra_compact':
-    epochs = 150  # More epochs for smaller model
-    patience = 25
+    epochs = 300     # Much more epochs for ultra-compact
+    patience = 50    # More patience for convergence
 elif arch_info['name'] == 'compact':
-    epochs = 120
-    patience = 20
+    epochs = 200
+    patience = 35
 else:
-    epochs = 100
-    patience = 15
+    epochs = 150
+    patience = 25
 
 print(f"Training epochs: {epochs}, Patience: {patience}")
 print(f"Batch size: {batch_size}, Steps per epoch: {steps_per_epoch}")
@@ -140,6 +152,7 @@ else:
 print(f"\n🏋️ STARTING TRAINING...")
 best_recon_loss = float('inf')
 wait = 0
+lr_wait = 0
 
 for epoch in range(epochs):
     print(f"\nEpoch {epoch + 1}/{epochs}")
@@ -177,7 +190,8 @@ for epoch in range(epochs):
             reconstructed = decoder(z)
             
             kl_loss_val = kl_loss(z_mean, z_log_var)
-            recon_loss_val = reconstruction_loss(real_seq, reconstructed)
+            # Use contrastive reconstruction loss for better separation
+            recon_loss_val = contrastive_reconstruction_loss(real_seq, reconstructed)
             
             if use_discriminator:
                 fake_pred = discriminator(reconstructed)
@@ -221,6 +235,7 @@ for epoch in range(epochs):
     if epoch_losses['recon_loss'] < best_recon_loss:
         best_recon_loss = epoch_losses['recon_loss']
         wait = 0
+        lr_wait = 0
         
         # Save models with architecture-specific naming
         arch_name = arch_info['name']
@@ -231,6 +246,16 @@ for epoch in range(epochs):
         print(f"✅ Models saved at epoch {epoch + 1} ({arch_name} architecture)")
     else:
         wait += 1
+        lr_wait += 1
+        
+        # Learning rate decay
+        if lr_wait >= lr_decay_patience:
+            old_lr = generator_optimizer.learning_rate.numpy()
+            new_lr = old_lr * lr_decay_factor
+            generator_optimizer.learning_rate.assign(new_lr)
+            lr_wait = 0
+            print(f"🔽 Learning rate decayed: {old_lr:.6f} → {new_lr:.6f}")
+        
         if wait >= patience:
             print(f"⏹️ Early stopping at epoch {epoch + 1} (patience: {patience})")
             break

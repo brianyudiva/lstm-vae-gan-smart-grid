@@ -41,8 +41,8 @@ def compute_reconstruction_errors(encoder, decoder, X_data):
 try:
     # Try loading with custom objects
     custom_objects = {'sampling': sampling}
-    encoder = tf.keras.models.load_model("outputs/checkpoints/compact_encoder_best.h5", custom_objects=custom_objects)
-    decoder = tf.keras.models.load_model("outputs/checkpoints/compact_decoder_best.h5", custom_objects=custom_objects)
+    encoder = tf.keras.models.load_model("outputs/checkpoints/ultra_compact_encoder_best.h5", custom_objects=custom_objects)
+    decoder = tf.keras.models.load_model("outputs/checkpoints/ultra_compact_decoder_best.h5", custom_objects=custom_objects)
     print("✅ Models loaded successfully")
 except Exception as e:
     print(f"❌ Error loading models: {e}")
