@@ -2,10 +2,14 @@ import tensorflow as tf
 from tensorflow.keras import layers, models
 from tensorflow.keras.regularizers import l1_l2
 
+"""
+1. HIGH CAPACITY input_shape, latent_dim=12)
+2. REGULAR (input_shape, latent_dim=8)
+3. COMPACT (input_shape, latent_dim=4)
+"""
 
 # === SHARED UTILITIES ===
 def sampling_layer(z_mean, z_log_var, name='sampling'):
-    """Standardized reparameterization trick for VAE"""
     def sampling(args):
         z_mean, z_log_var = args
         batch = tf.shape(z_mean)[0]
@@ -13,24 +17,20 @@ def sampling_layer(z_mean, z_log_var, name='sampling'):
         epsilon = tf.random.normal(shape=(batch, dim))
         return z_mean + tf.exp(0.5 * z_log_var) * epsilon
     
-    # Get latent dimension from z_mean shape at build time
     latent_dim = z_mean.shape[-1]
     return layers.Lambda(sampling, output_shape=(latent_dim,), name=name)([z_mean, z_log_var])
 
 def build_lstm_vae_gan_regular(input_shape, latent_dim=8):
-    """Regular architecture with better capacity for high-dimensional data"""
-    
-    # Adjusted regularization for higher capacity
     l1_reg = 5e-4
     l2_reg = 1e-3
-    dropout_rate = 0.3  # Reduced dropout for better learning
+    dropout_rate = 0.3
     
     # === ENCODER ===
     encoder_input = layers.Input(shape=input_shape, name='input_layer')
     
     # Multi-layer LSTM with increasing capacity
     x = layers.LSTM(
-        32,  # Increased capacity
+        32,
         return_sequences=True, 
         kernel_regularizer=l1_l2(l1_reg, l2_reg),
         recurrent_regularizer=l1_l2(l1_reg, l2_reg),
@@ -125,17 +125,13 @@ def build_lstm_vae_gan_regular(input_shape, latent_dim=8):
     return encoder, decoder, discriminator
 
 def build_lstm_vae_gan_high_capacity(input_shape, latent_dim=12):
-    """High-capacity architecture for complex high-dimensional data like Jacobian FDIA"""
-    
-    # Minimal regularization for maximum learning capacity
     l1_reg = 1e-5
     l2_reg = 1e-4
-    dropout_rate = 0.15  # Very low dropout
+    dropout_rate = 0.15
     
     # === ENCODER ===
     encoder_input = layers.Input(shape=input_shape, name='input_layer')
     
-    # Deep LSTM with attention-like mechanism
     x = layers.LSTM(
         64,  # High capacity
         return_sequences=True, 
@@ -251,10 +247,7 @@ def build_lstm_vae_gan_high_capacity(input_shape, latent_dim=12):
     
     return encoder, decoder, discriminator
 
-def build_lstm_vae_gan_compact(input_shape, latent_dim=4):
-    """Compact architecture for simple datasets"""
-    
-    # Regularization parameters
+def build_lstm_vae_gan_compact(input_shape, latent_dim=4):    
     l1_reg = 1e-3
     l2_reg = 1e-2
     dropout_rate = 0.7
@@ -339,33 +332,25 @@ def select_architecture(normal_samples_count, input_shape, latent_dim=8, force_a
     elif force_architecture == 'regular':
         encoder, decoder, discriminator = build_lstm_vae_gan_regular(input_shape, latent_dim)
         arch_name = 'regular'
-    elif force_architecture == 'high_capacity':
-        encoder, decoder, discriminator = build_lstm_vae_gan_high_capacity(input_shape, latent_dim)
-        arch_name = 'high_capacity'
+    # elif force_architecture == 'high_capacity':
+    #     encoder, decoder, discriminator = build_lstm_vae_gan_high_capacity(input_shape, latent_dim)
+    #     arch_name = 'high_capacity'
     else:
         # Auto-select based on input dimensionality
         input_complexity = input_shape[0] * input_shape[1]  # sequence_len * features
         
-        if input_complexity > 600:  # High-dimensional like Jacobian dataset
-            encoder, decoder, discriminator = build_lstm_vae_gan_high_capacity(input_shape, latent_dim)
-            arch_name = 'high_capacity'
-            print(f"   Auto-selected HIGH CAPACITY architecture for complex input ({input_complexity} dims)")
-        elif input_complexity > 200:
+        # if input_complexity > 600:  # High-dimensional like Jacobian dataset
+        #     encoder, decoder, discriminator = build_lstm_vae_gan_high_capacity(input_shape, latent_dim)
+        #     arch_name = 'high_capacity'
+        #     print(f"   Auto-selected HIGH CAPACITY architecture for input ({input_complexity} dims)")
+        if input_complexity > 200:
             encoder, decoder, discriminator = build_lstm_vae_gan_regular(input_shape, latent_dim)
             arch_name = 'regular'
-            print(f"   Auto-selected REGULAR architecture for medium input ({input_complexity} dims)")
+            print(f"   Auto-selected REGULAR architecture for input ({input_complexity} dims)")
         else:
             encoder, decoder, discriminator = build_lstm_vae_gan_compact(input_shape, latent_dim)
             arch_name = 'compact'
-            print(f"   Auto-selected COMPACT architecture for simple input ({input_complexity} dims)")
-    
-    info = {
-        'name': arch_name,
-        'recommended_lr': 1e-4 if arch_name == 'compact' else 5e-5,
-        'kl_weight': 10.0 if arch_name == 'compact' else 2.0,
-        'recon_weight': 1000.0 if arch_name == 'compact' else 500.0,
-        'adv_weight': 0.1
-    }
+            print(f"   Auto-selected COMPACT architecture for input ({input_complexity} dims)")
     
     # Calculate parameters
     total_params = encoder.count_params() + decoder.count_params()
@@ -380,11 +365,9 @@ def select_architecture(normal_samples_count, input_shape, latent_dim=8, force_a
     print(f"   Data/Parameter ratio: {data_param_ratio:.2f}")
     print(f"   Latent dimension: {latent_dim}")
     
-    if arch_name == 'high_capacity':
-        print(f"   🚀 High-capacity model for complex stealth attacks")
-    elif arch_name == 'regular':
-        print(f"   ⚖️  Regular model for balanced performance")
+    if arch_name == 'regular':
+        print(f"   Regular model")
     else:
-        print(f"   🗜️  Compact model for simple datasets")
+        print(f"   Compact model")
     
-    return encoder, decoder, discriminator, info
+    return encoder, decoder, discriminator
