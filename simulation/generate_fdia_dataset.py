@@ -3,322 +3,328 @@ import pandas as pd
 import numpy as np
 import random
 import os
-import json
 from datetime import datetime, timedelta
+from scipy.sparse import csr_matrix
+from scipy.linalg import pinv
 
 # === CONFIG ===
 np.random.seed(42)
 random.seed(42)
 
 CONFIG = {
-    'n_days': 300,
-    'hours_per_day': 24,
-    'fdia_rate': 0.15,  # 15% of hours have attacks
-    'min_attacks_per_day': 1,
-    'max_attacks_per_day': 4,
+    'n_timesteps': 16800,  # 700 days * 24 hours
+    'fdia_probability': 0.3,  # 30% of timesteps have FDIA attacks
+    'measurement_noise_std': 0.01,  # 1% measurement noise
+    'attack_magnitude_range': (0.02, 0.08),  # 2-8% attack magnitude
     'convergence_tolerance': 1e-6,
     'max_retries': 3,
     'output_dir': 'data/processed',
+    'n_buses': 13,  # IEEE 13-bus system
 }
 
-total_hours = CONFIG['n_days'] * CONFIG['hours_per_day']
+os.makedirs(CONFIG['output_dir'], exist_ok=True)
 
-print(f"Initializing FDIA dataset generation")
-print(f"Simulation period: {CONFIG['n_days']} days ({total_hours} hours)")
-print(f"Target FDIA rate: {CONFIG['fdia_rate']*100:.1f}%")
+print(f"Initializing Jacobian-based FDIA dataset generation")
+print(f"Timesteps: {CONFIG['n_timesteps']} ({CONFIG['n_timesteps']/24:.0f} days)")
+print(f"FDIA probability: {CONFIG['fdia_probability']*100:.1f}%")
 
-def create_realistic_profiles():
-    """Create realistic solar and load profiles"""
-    daily_solar = []
-    for h in range(24):
-        base_solar = max(0, np.sin((np.pi / 12) * (h - 6)))
-        noise = np.random.normal(0, 0.1)
-        solar = max(0, min(1, base_solar + noise))
-        daily_solar.append(solar)
+class StateEstimationFDIA:
+    """
+    Realistic FDIA generation using state estimation framework
+    Based on Liu et al. (2009) - False data injection attacks against state estimation
+    """
     
-    daily_load = []
-    for h in range(24):
-        if 6 <= h <= 8 or 17 <= h <= 22:  # Peak hours
-            load_factor = 0.9 + np.random.normal(0, 0.05)
-        elif 22 <= h or h <= 6:  # Night hours
-            load_factor = 0.4 + np.random.normal(0, 0.03)
-        else:  # Off-peak
-            load_factor = 0.6 + np.random.normal(0, 0.04)
+    def __init__(self, n_buses=13):
+        self.n_buses = n_buses
+        self.measurement_matrix = None
+        self.jacobian_matrix = None
         
-        daily_load.append(max(0.3, min(1.0, load_factor)))
-    
-    return daily_solar, daily_load
-
-class FDIAAttackGenerator:
-    def __init__(self):
-        self.pv_buses = ["675", "692", "633"]
-        self.critical_buses = ["632", "633", "634", "645", "646"]
-
-        self.attack_types = {
-            1: {"name": "Voltage Spike", "severity": "high", "detection_difficulty": "medium"},
-            2: {"name": "Voltage Sag", "severity": "high", "detection_difficulty": "medium"}, 
-            3: {"name": "PV Manipulation", "severity": "medium", "detection_difficulty": "hard"},
-            4: {"name": "Measurement Noise", "severity": "low", "detection_difficulty": "hard"},
-            5: {"name": "Coordinated Attack", "severity": "critical", "detection_difficulty": "medium"},
-            6: {"name": "Stealthy Bias", "severity": "medium", "detection_difficulty": "very_hard"}
-        }
-
-    def generate_attack_schedule(self, n_days):
-        """Generate attack schedule"""
-        schedule = {}
-        total_attacks = 0
-        type_counts = {i: 0 for i in range(1, 7)}
-        
-        for day in range(n_days):
-            # Vary attack frequency (some days no attacks, some days multiple)
-            attack_prob = np.random.random()
-            if attack_prob < 0.3:  # 30% of days have no attacks
-                continue
-            elif attack_prob < 0.7:  # 40% have 1-2 attacks
-                num_attacks = np.random.randint(1, 3)
-            else:  # 30% have 2-4 attacks
-                num_attacks = np.random.randint(2, 5)
+    def extract_system_state(self):
+        """Extract true system state (voltage magnitudes and angles)"""
+        try:
+            # Get voltage magnitudes (per unit)
+            vmag = np.array(dss.Circuit.AllBusMagPu())
             
-            # Prefer attacks during peak hours when impact is higher
-            peak_hours = list(range(7, 10)) + list(range(17, 22))
-            off_peak_hours = list(range(0, 7)) + list(range(10, 17)) + list(range(22, 24))
+            # Get voltage angles - use bus iteration method
+            vang = []
+            bus_names = dss.Circuit.AllBusNames()
             
-            hours = []
-            for _ in range(num_attacks):
-                if np.random.random() < 0.7:  # 70% during peak
-                    hour = np.random.choice(peak_hours)
+            for bus_name in bus_names:
+                dss.Circuit.SetActiveBus(bus_name)
+                # Get the voltage angle for the first phase of each bus
+                # Use Bus.puVmagAngle which returns [mag1, ang1, mag2, ang2, ...]
+                vm_ang = dss.Bus.puVmagAngle()
+                if len(vm_ang) >= 2:
+                    angle_deg = vm_ang[1]  # Second element is angle in degrees
+                    vang.append(np.deg2rad(angle_deg))  # Convert to radians
                 else:
-                    hour = np.random.choice(off_peak_hours)
-                
-                if hour not in hours:  # Avoid duplicate hours
-                    hours.append(hour)
+                    vang.append(0.0)  # Default angle if no data
             
-            schedule[day] = {}
-            for h in hours:
-                attack_type = self._select_attack_type()
-                target_bus = self._select_target_bus(attack_type)
-                
-                schedule[day][h] = {
-                    "type": attack_type,
-                    "target": target_bus,
-                    "severity": np.random.uniform(0.5, 1.0)  # Attack intensity
-                }
-                
-                total_attacks += 1
-                type_counts[attack_type] += 1
+            vang = np.array(vang)
+            
+            # Combine into state vector [V_mag, V_ang]
+            state_vector = np.concatenate([vmag, vang])
+            
+            return state_vector
+            
+        except Exception as e:
+            print(f"Error extracting system state: {e}")
+            return None
+    
+    def compute_measurement_jacobian(self, state_vector):
+        """
+        Compute Jacobian matrix H for measurement function z = h(x)
+        Simplified approximation for demonstration
+        """
+        n_states = len(state_vector)
+        n_measurements = n_states  # Assume full observability
         
-        return schedule, total_attacks, type_counts
+        # Simplified Jacobian (identity-like with small perturbations)
+        # In practice, this would be computed from power flow sensitivities
+        H = np.eye(n_measurements, n_states)
+        
+        # Add some coupling between voltage magnitudes and angles
+        n_vmag = n_states // 2
+        for i in range(n_vmag):
+            if i + n_vmag < n_states:
+                H[i, i + n_vmag] = 0.1  # Small coupling
+                H[i + n_vmag, i] = 0.05
+        
+        # Add measurement noise correlation
+        noise_factor = np.random.normal(1.0, 0.02, size=(n_measurements, n_states))
+        H = H * noise_factor
+        
+        return H
     
-    def _select_attack_type(self):
-        """Select attack type with probabilities"""
-        # More sophisticated attacks are less frequent
-        probabilities = [0.25, 0.25, 0.2, 0.15, 0.1, 0.05]  # Types 1-6
-        return np.random.choice(range(1, 7), p=probabilities)
-    
-    def _select_target_bus(self, attack_type):
-        """Select target bus based on attack type"""
-        if attack_type == 3:  # PV manipulation
-            return np.random.choice(self.pv_buses)
-        elif attack_type in [5, 6]:  # Coordinated/stealthy attacks
-            return np.random.choice(self.critical_buses)
+    def generate_measurements(self, state_vector, add_noise=True):
+        """Generate measurements z = Hx + e"""
+        if state_vector is None:
+            return None, None
+            
+        # Compute measurement Jacobian
+        H = self.compute_measurement_jacobian(state_vector)
+        
+        # Generate measurements
+        z_true = H @ state_vector
+        
+        if add_noise:
+            # Add Gaussian measurement noise
+            noise = np.random.normal(0, CONFIG['measurement_noise_std'], size=z_true.shape)
+            z_measured = z_true + noise
         else:
-            all_buses = self.pv_buses + self.critical_buses
-            return np.random.choice(all_buses)
+            z_measured = z_true.copy()
+            
+        return z_measured, H
+    
+    def generate_stealthy_attack_vector(self, H, attack_magnitude=None):
+        """
+        Generate stealthy FDIA attack vector a = Hc
+        Attack is undetectable by residual-based bad data detection
+        """
+        if H is None:
+            return None
+            
+        n_states = H.shape[1]
         
-def simulate_with_fdia(hour_of_day, day, fdia_info, daily_solar, daily_load):
-    max_retries = CONFIG['max_retries']
+        # Random attack magnitude
+        if attack_magnitude is None:
+            attack_magnitude = np.random.uniform(*CONFIG['attack_magnitude_range'])
+        
+        # Generate random sparse attack vector c
+        # Attack only a subset of states to maintain stealth
+        n_attacked_states = max(1, int(0.3 * n_states))  # Attack 30% of states
+        attacked_indices = np.random.choice(n_states, n_attacked_states, replace=False)
+        
+        c = np.zeros(n_states)
+        c[attacked_indices] = np.random.normal(0, attack_magnitude, size=n_attacked_states)
+        
+        # Compute attack vector a = Hc (ensures stealth property)
+        attack_vector = H @ c
+        
+        return attack_vector, c
     
-    for attempt in range(max_retries):
-            # Apply load profile
-            total_load_kw = sum(daily_load) * 100  # Scale appropriately
+    def apply_fdia_attack(self, measurements, attack_vector):
+        """Apply FDIA attack: z' = z + a"""
+        if measurements is None or attack_vector is None:
+            return measurements
             
-            # Configure PV systems
-            total_pv_kw = 0
-            pv_config = {"675": 50, "692": 50, "633": 50}
-            
-            for bus, max_kw in pv_config.items():
-                pv_power = daily_solar[hour_of_day] * max_kw
-                
-                # Apply FDIA Type 3 (PV manipulation)
-                if (fdia_info and fdia_info["type"] == 3 and 
-                    fdia_info["target"] == bus):
-                    severity = fdia_info.get("severity", 0.5)
-                    multiplier = 0.5 + severity * 0.5  # 0.5 to 1.0 range
-                    pv_power *= np.random.uniform(multiplier, 1.5)
-                
-                dss.Command(f"Generator.PV{bus}.kW={pv_power}")
-                total_pv_kw += pv_power
-            
-            # Solve power flow
-            dss.Solution.Solve()
-            
-            if not dss.Solution.Converged():
-                if attempt < max_retries - 1:
-                    print(f"⚠️ Convergence failed at hour {day*24 + hour_of_day}, attempt {attempt + 1}")
-                    continue
-                else:
-                    print(f"❌ Final convergence failure at hour {day*24 + hour_of_day}")
-                    return None
-            
-            # Extract measurements
-            buses = dss.Circuit.AllBusNames()
-            vmag = dss.Circuit.AllBusMagPu()
-            
-            voltages = {}
-            i = 0
-            for bus in buses:
-                dss.Circuit.SetActiveBus(bus)
-                num_phases = dss.Bus.NumNodes()
-                if num_phases > 0:
-                    voltages[bus] = np.mean(vmag[i:i + num_phases])
-                else:
-                    voltages[bus] = 1.0  # Default voltage
-                i += num_phases
-            
-            # Create record
-            record = voltages.copy()
-            record.update({
-                "hour": hour_of_day,
-                "day": day,
-                "timestamp": f"day{day}_hour{hour_of_day:02d}",
-                "pv_kw": total_pv_kw,
-                "load_kw": total_load_kw,
-                "fdia": 1 if fdia_info else 0,
-                "fdia_type": fdia_info["type"] if fdia_info else 0,
-                "fdia_target_bus": fdia_info["target"] if fdia_info else None,
-                "fdia_severity": fdia_info.get("severity", 0) if fdia_info else 0
-            })
-            
-            # Apply voltage-based FDIA attacks
-            if fdia_info:
-                record = apply_voltage_attacks(record, fdia_info, voltages)
-            
-            return record
-    
-    return None
+        return measurements + attack_vector
 
-def apply_voltage_attacks(record, fdia_info, original_voltages):
-    """Apply voltage-based attacks"""
-    attack_type = fdia_info["type"]
-    target_bus = fdia_info["target"]
-    severity = fdia_info.get("severity", 0.5)
+def create_load_profile(timestep):
+    """Create realistic load profile based on time of day and season"""
+    hour_of_day = timestep % 24
+    day_of_year = (timestep // 24) % 365
     
-    # Find target bus in voltage measurements
-    target_key = None
-    for key in original_voltages:
-        if target_bus in key:
-            target_key = key
-            break
+    # Base load profile (daily pattern)
+    if 6 <= hour_of_day <= 8 or 17 <= hour_of_day <= 22:  # Peak hours
+        base_load = 0.85
+    elif 22 <= hour_of_day or hour_of_day <= 6:  # Night hours
+        base_load = 0.45
+    else:  # Off-peak
+        base_load = 0.65
     
-    if not target_key:
-        return record
+    # Seasonal variation
+    seasonal_factor = 1.0 + 0.2 * np.sin(2 * np.pi * day_of_year / 365)
     
-    if attack_type == 1:  # Voltage spike
-        spike = 0.05 + severity * 0.15  # 5-20% increase
-        record[target_key] = min(record[target_key] + spike, 1.5)
+    # Add random variation
+    load_factor = base_load * seasonal_factor * (1 + np.random.normal(0, 0.05))
+    
+    return max(0.3, min(1.2, load_factor))
+
+def simulate_timestep(timestep, fdia_generator):
+    """Simulate single timestep with optional FDIA attack"""
+    
+    # Set realistic load based on time
+    load_factor = create_load_profile(timestep)
+    
+    # Apply load to the system (simplified)
+    try:
+        # Set loads proportionally
+        dss.Loads.First()
+        while dss.Loads.Name():
+            base_kw = dss.Loads.kW()
+            dss.Loads.kW(base_kw * load_factor)
+            if not dss.Loads.Next():
+                break
         
-    elif attack_type == 2:  # Voltage sag
-        drop = 0.05 + severity * 0.15  # 5-20% decrease
-        record[target_key] = max(record[target_key] - drop, 0.8)
+        # Solve power flow
+        dss.Solution.Solve()
         
-    elif attack_type == 4:  # Measurement noise
-        noise_std = 0.01 + severity * 0.03  # 1-4% noise
-        noise = np.random.normal(0, noise_std)
-        record[target_key] += noise
+        if not dss.Solution.Converged():
+            return None
+            
+    except Exception as e:
+        print(f"Power flow error at timestep {timestep}: {e}")
+        return None
+    
+    # Extract system state
+    state_vector = fdia_generator.extract_system_state()
+    if state_vector is None:
+        return None
+    
+    # Generate normal measurements
+    z_normal, H = fdia_generator.generate_measurements(state_vector, add_noise=True)
+    if z_normal is None:
+        return None
+    
+    # Determine if this timestep has an attack
+    has_attack = np.random.random() < CONFIG['fdia_probability']
+    
+    if has_attack:
+        # Generate stealthy attack
+        attack_vector, attack_state = fdia_generator.generate_stealthy_attack_vector(H)
+        z_attacked = fdia_generator.apply_fdia_attack(z_normal, attack_vector)
         
-    elif attack_type == 5:  # Coordinated attack (multiple buses)
-        for key in original_voltages:
-            if any(bus in key for bus in ["632", "633", "634"]):
-                bias = np.random.uniform(-0.05, 0.05) * severity
-                record[key] += bias
-                
-    elif attack_type == 6:  # Stealthy bias
-        bias = np.random.uniform(-0.02, 0.02) * severity  # Very small bias
-        record[target_key] += bias
+        # Calculate attack statistics
+        attack_magnitude = np.linalg.norm(attack_vector)
+        attack_stealth = np.linalg.norm(attack_state) if attack_state is not None else 0
+        
+    else:
+        z_attacked = z_normal.copy()
+        attack_vector = np.zeros_like(z_normal)
+        attack_magnitude = 0.0
+        attack_stealth = 0.0
+    
+    # Create record
+    record = {
+        'timestep': timestep,
+        'hour_of_day': timestep % 24,
+        'day': timestep // 24,
+        'load_factor': load_factor,
+        'fdia_label': 1 if has_attack else 0,
+        'attack_magnitude': attack_magnitude,
+        'attack_stealth': attack_stealth,
+        'measurement_noise_std': CONFIG['measurement_noise_std']
+    }
+    
+    # Add measurements (normal and attacked)
+    for i, (z_norm, z_att) in enumerate(zip(z_normal, z_attacked)):
+        record[f'z_normal_{i}'] = z_norm
+        record[f'z_attacked_{i}'] = z_att
+        record[f'attack_vector_{i}'] = attack_vector[i]
     
     return record
 
-dss.Basic.ClearAll()
+# === MAIN EXECUTION ===
+if __name__ == "__main__":
+    # Initialize OpenDSS and load IEEE 13-bus system
+    dss.Basic.ClearAll()
 
-try:
-    dss.Command(r"Redirect data/raw/IEEE13Nodeckt.dss")
-    print("IEEE 13-bus system loaded successfully")
-except Exception as e:
-    print(f"Failed to load IEEE 13-bus system: {e}")
-    raise
+    try:
+        dss.Command(r"Redirect data/raw/IEEE13Nodeckt.dss")
+        print("IEEE 13-bus system loaded successfully")
+    except Exception as e:
+        print(f"Failed to load IEEE 13-bus system: {e}")
+        raise
 
-num_buses = dss.Circuit.NumBuses()
-print(f"System verified: {num_buses} buses")
+    num_buses = dss.Circuit.NumBuses()
+    print(f"System verified: {num_buses} buses")
 
-if num_buses == 0:
-    raise ValueError("No buses found - check DSS file")
+    if num_buses == 0:
+        raise ValueError("No buses found - check DSS file")
 
-# Create profiles
-daily_solar, daily_load = create_realistic_profiles()
+    # Initialize FDIA generator
+    fdia_generator = StateEstimationFDIA(n_buses=num_buses)
 
-# Generate attack schedule
-print("Generating FDIA attack schedule")
-attack_gen = FDIAAttackGenerator()
-fdia_schedule, total_attacks, type_counts = attack_gen.generate_attack_schedule(CONFIG['n_days'])
+    # Run simulation
+    print(f"\nStarting FDIA simulation")
+    print(f"Generating {CONFIG['n_timesteps']} timesteps with {CONFIG['fdia_probability']*100:.1f}% FDIA probability")
 
-print(f"FDIA Schedule Summary:")
-print(f"   Total attack hours: {total_attacks}/{total_hours} ({total_attacks/total_hours*100:.1f}%)")
-for attack_type, count in type_counts.items():
-    attack_name = attack_gen.attack_types[attack_type]["name"]
-    print(f"   Type {attack_type} ({attack_name}): {count} hours")
+    records = []
+    failed_timesteps = 0
+    attack_count = 0
 
-# Run simulation
-print(f"\nStarting simulation")
-records = []
-failed_hours = 0
+    for t in range(CONFIG['n_timesteps']):
+        record = simulate_timestep(t, fdia_generator)
+        
+        if record:
+            records.append(record)
+            if record['fdia_label'] == 1:
+                attack_count += 1
+        else:
+            failed_timesteps += 1
+            # Create basic record for failed simulations
+            basic_record = {
+                'timestep': t,
+                'hour_of_day': t % 24,
+                'day': t // 24,
+                'fdia_label': 0,
+                'failed_simulation': True
+            }
+            records.append(basic_record)
+        
+        # Progress indicator
+        if t % 1000 == 0 and t > 0:
+            progress = (t / CONFIG['n_timesteps']) * 100
+            current_attack_rate = (attack_count / t) * 100
+            print(f"Progress: {progress:.1f}% ({t}/{CONFIG['n_timesteps']} timesteps)")
+            print(f"   Success: {((t - failed_timesteps) / t * 100):.1f}%, FDIA: {current_attack_rate:.1f}%")
 
-for t in range(total_hours):
-    hour_of_day = t % 24
-    day = t // 24
-    fdia_info = fdia_schedule.get(day, {}).get(hour_of_day)
-    
-    record = simulate_with_fdia(hour_of_day, day, fdia_info, daily_solar, daily_load)
-    
-    if record:
-        records.append(record)
-    else:
-        failed_hours += 1
-        # Create a basic record for failed simulations
-        basic_record = {
-            "hour": hour_of_day,
-            "day": day,
-            "timestamp": f"day{day}_hour{hour_of_day:02d}",
-            "fdia": 1 if fdia_info else 0,
-            "fdia_type": fdia_info["type"] if fdia_info else 0,
-            "failed_simulation": True
-        }
-        records.append(basic_record)
-    
-    # Progress indicator
-    if t % 240 == 0:  # Every 10 days
-        progress = (t / total_hours) * 100
-        print(f"Progress: {progress:.1f}% ({t}/{total_hours} hours, {failed_hours} failed)")
+    print(f"\nSimulation complete")
+    print(f"Total timesteps: {CONFIG['n_timesteps']}")
+    print(f"Failed simulations: {failed_timesteps}")
+    print(f"Success rate: {((CONFIG['n_timesteps'] - failed_timesteps) / CONFIG['n_timesteps'] * 100):.1f}%")
 
-print(f"\nSimulation complete")
-print(f"Success rate: {((total_hours - failed_hours) / total_hours * 100):.1f}%")
+    # Create DataFrame
+    df = pd.DataFrame(records)
 
-df = pd.DataFrame(records)
+    print(f"\nFinal Dataset Statistics:")
+    print(f"Total records: {len(df)}")
+    print(f"FDIA records: {df['fdia_label'].sum()}")
+    print(f"FDIA percentage: {(df['fdia_label'].sum() / len(df) * 100):.1f}%")
 
-print(f"\nFinal Dataset Statistics:")
-print(f"Total records: {len(df)}")
-print(f"Failed simulations: {failed_hours}")
-print(f"FDIA records: {df['fdia'].sum()}")
-print(f"FDIA percentage: {(df['fdia'].sum() / len(df) * 100):.1f}%")
+    # Calculate statistics for attacked measurements
+    if 'attack_magnitude' in df.columns:
+        attacked_df = df[df['fdia_label'] == 1]
+        if len(attacked_df) > 0:
+            print(f"Average attack magnitude: {attacked_df['attack_magnitude'].mean():.6f}")
+            print(f"Attack magnitude range: {attacked_df['attack_magnitude'].min():.6f} - {attacked_df['attack_magnitude'].max():.6f}")
 
-if 'fdia_type' in df.columns:
-    fdia_counts = df.groupby('fdia_type').size()
-    for attack_type in range(1, 7):
-        if attack_type in fdia_counts:
-            attack_name = attack_gen.attack_types[attack_type]["name"]
-            print(f"Type {attack_type} ({attack_name}): {fdia_counts[attack_type]}")
+    # Save dataset
+    filename = f"ieee13_fdia_dataset.csv"
+    output_path = f"{CONFIG['output_dir']}/{filename}"
+    df.to_csv(output_path, index=False)
 
-filename = f"ieee13_fdia.csv"
-df.to_csv(f"{CONFIG['output_dir']}/{filename}", index=False)
+    print(f"\nDataset saved: {filename}")
+    print(f"Saved to: {CONFIG['output_dir']}/")
 
-print(f"\nDataset saved: {filename}")
-print(f"Saved to: {CONFIG['output_dir']}/")
