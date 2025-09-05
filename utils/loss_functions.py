@@ -240,3 +240,69 @@ def anomaly_regularization_loss(z_mean, z_log_var, latent_samples):
             0.5 * magnitude_loss +        # Keep near origin  
             0.8 * latent_var +           # Reduce variance
             0.3 * sphere_loss)           # Hypersphere constraint
+
+
+def vae_loss(y_true, y_pred, encoder, latent_dim, beta=1.0):
+    """
+    Combined VAE loss function for baseline models
+    
+    Args:
+        y_true: True input data
+        y_pred: Reconstructed data
+        encoder: Encoder model to extract latent variables
+        latent_dim: Dimension of latent space
+        beta: Weight for KL divergence term
+    """
+    # Reconstruction loss
+    recon_loss = reconstruction_loss(y_true, y_pred)
+    
+    # Get latent variables from encoder
+    encoder_output = encoder(y_true)
+    if isinstance(encoder_output, list) and len(encoder_output) >= 2:
+        z_mean, z_log_var = encoder_output[0], encoder_output[1]
+    else:
+        # If encoder doesn't return mean and log_var, create dummy ones
+        batch_size = tf.shape(y_true)[0]
+        z_mean = tf.zeros((batch_size, latent_dim))
+        z_log_var = tf.zeros((batch_size, latent_dim))
+    
+    # KL divergence loss
+    kl_loss_val = kl_loss(z_mean, z_log_var)
+    
+    return recon_loss + beta * kl_loss_val
+
+
+def combined_loss(y_true, y_pred, encoder, discriminator, latent_dim, beta=1.0, gamma=0.1):
+    """
+    Combined loss for VAE-GAN models
+    
+    Args:
+        y_true: True input data
+        y_pred: Reconstructed data
+        encoder: Encoder model
+        discriminator: Discriminator model
+        latent_dim: Dimension of latent space
+        beta: Weight for KL divergence
+        gamma: Weight for adversarial loss
+    """
+    # VAE loss
+    vae_loss_val = vae_loss(y_true, y_pred, encoder, latent_dim, beta)
+    
+    # Adversarial loss - we want discriminator to think reconstructions are real
+    disc_pred = discriminator(y_pred)
+    adversarial_loss = tf.reduce_mean(tf.keras.losses.binary_crossentropy(
+        tf.ones_like(disc_pred), disc_pred
+    ))
+    
+    return vae_loss_val + gamma * adversarial_loss
+
+
+def wasserstein_loss(y_true, y_pred):
+    """
+    Wasserstein loss for GAN training
+    
+    Args:
+        y_true: True labels (1 for real, -1 for fake)
+        y_pred: Predicted values from discriminator
+    """
+    return tf.reduce_mean(y_true * y_pred)

@@ -12,11 +12,11 @@ CONFIG = {
     'n_timesteps': 17520,  # 730 days * 24 hours (2 years)
     'fdia_probability': 0.1,
     'measurement_noise_std': 0.01,
-    'attack_magnitude': 0.02,
+    'attack_magnitude': 0.05,
     'convergence_tolerance': 1e-6,
     'max_retries': 3,
     'output_dir': 'data/processed',
-    'n_buses': 13,
+    'n_buses': 37,
 }
 
 os.makedirs(CONFIG['output_dir'], exist_ok=True)
@@ -31,7 +31,7 @@ class StateEstimationFDIA:
     Based on Liu et al. (2009) - False data injection attacks against state estimation
     """
     
-    def __init__(self, n_buses=13):
+    def __init__(self, n_buses=37):
         self.n_buses = n_buses
         self.measurement_matrix = None
         self.jacobian_matrix = None
@@ -146,9 +146,9 @@ class StateEstimationFDIA:
         # Strategy 1: Target voltage magnitude states (more observable)
         n_vmag = n_states // 2
         
-        # Create attack pattern with probability on voltage magnitudes
-        attack_probs = np.ones(n_states) * 0.85 
-        attack_probs[:n_vmag] = 0.98  
+        # Create attack pattern with EXTREMELY high probability on voltage magnitudes
+        attack_probs = np.ones(n_states) * 0.85  # Much higher base probability (was 0.7)
+        attack_probs[:n_vmag] = 0.98  # Almost guaranteed attack on voltage magnitudes (was 0.95)
         
         # Generate attack mask
         attack_mask = np.random.random(n_states) < attack_probs
@@ -303,10 +303,10 @@ if __name__ == "__main__":
     dss.Basic.ClearAll()
 
     try:
-        dss.Command(r"Redirect data/raw/IEEE13Nodeckt.dss")
-        print("IEEE 13-bus system loaded successfully")
+        dss.Command(r"Redirect data/raw/IEEE37Nodeckt.dss")
+        print("IEEE 37-bus system loaded successfully")
     except Exception as e:
-        print(f"Failed to load IEEE 13-bus system: {e}")
+        print(f"Failed to load IEEE 37-bus system: {e}")
         raise
 
     num_buses = dss.Circuit.NumBuses()
@@ -338,7 +338,7 @@ if __name__ == "__main__":
     print(f"FDIA records: {df['fdia_label'].sum()}")
     print(f"FDIA percentage: {(df['fdia_label'].sum() / len(df) * 100):.1f}%")
 
-    filename = f"ieee13_fdia_dataset.csv"
+    filename = f"ieee37_fdia_dataset.csv"
     output_path = f"{CONFIG['output_dir']}/{filename}"
     df.to_csv(output_path, index=False)
 

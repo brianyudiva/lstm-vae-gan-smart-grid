@@ -13,7 +13,7 @@ def preprocess_with_zscore_all_data():
     os.makedirs(sequence_dir, exist_ok=True)
 
     print("=" * 60)
-    print("Z-SCORE NORMALIZATION (ALL DATA)")
+    print("NORMALIZATION")
     print("=" * 60)
 
     df = pd.read_csv(input_csv)
@@ -34,6 +34,7 @@ def preprocess_with_zscore_all_data():
     features_raw = df[z_attacked_cols].values
     labels = df["fdia_label"].values
 
+    # Create time features
     hour_sin = np.sin(2 * np.pi * df["hour_of_day"] / 24)
     hour_cos = np.cos(2 * np.pi * df["hour_of_day"] / 24)
     day_sin = np.sin(2 * np.pi * df["day"] / 7)
@@ -42,99 +43,117 @@ def preprocess_with_zscore_all_data():
 
     all_features = np.column_stack([features_raw, time_features])
 
-    normal_mask = labels == 0
-    attack_mask = labels == 1
+    # === BUILD SEQUENCES FIRST (BEFORE SCALING) ===
+    print(f"\n🔗 BUILDING SEQUENCES (before scaling):")
+    X_raw, y_fdia = [], []
+    total_sequences = len(all_features) - sequence_length + 1
 
-    normal_features = features_raw[normal_mask]
-    attack_features = features_raw[attack_mask]
+    for i in range(total_sequences):
+        X_seq = all_features[i:i + sequence_length]
+        y_seq = int(labels[i + sequence_length - 1])  # Label based on last timestep
+        
+        X_raw.append(X_seq)
+        y_fdia.append(y_seq)
 
-    print(f"\nDATA OVERVIEW:")
-    print(f"Normal samples: {len(normal_features)}")
-    print(f"Attack samples: {len(attack_features)}")
+    X_raw = np.array(X_raw)
+    y_fdia = np.array(y_fdia)
 
-    print(f"\nPRE-SCALING ANALYSIS:")
-    print(f"Normal data - Mean: {np.mean(normal_features):.6f}, Std: {np.std(normal_features):.6f}")
-    print(f"Attack data - Mean: {np.mean(attack_features):.6f}, Std: {np.std(attack_features):.6f}")
-    attack_signal_strength = np.abs(np.mean(attack_features) - np.mean(normal_features))
-    print(f"Attack signal strength: {attack_signal_strength:.6f}")
+    print(f"Created {len(X_raw)} sequences of length {sequence_length}")
+    print(f"Attack sequences: {np.sum(y_fdia)}/{len(y_fdia)} ({np.sum(y_fdia)/len(y_fdia)*100:.1f}%)")
+
+    # === TRAIN/TEST SPLIT (BEFORE SCALING) ===
+    X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+        X_raw, y_fdia, test_size=0.2, random_state=42, stratify=y_fdia
+    )
+
+    print(f"\nTRAIN/TEST SPLIT (before scaling):")
+    print(f"Train: {len(X_train_raw)} sequences, {np.sum(y_train)} attacks ({np.sum(y_train)/len(y_train)*100:.1f}%)")
+    print(f"Test:  {len(X_test_raw)} sequences, {np.sum(y_test)} attacks ({np.sum(y_test)/len(y_test)*100:.1f}%)")
+
+    # === FIT SCALER ON TRAIN DATA ONLY ===
+    print(f"\n📏 FITTING SCALER ON TRAIN DATA ONLY:")
     
+    # Reshape training data to 2D for scaler fitting
+    X_train_flat = X_train_raw.reshape(-1, X_train_raw.shape[-1])
+    
+    # Calculate pre-scaling statistics on training data
+    normal_mask_train = y_train == 0
+    attack_mask_train = y_train == 1
+    
+    X_train_normal_flat = X_train_raw[normal_mask_train].reshape(-1, X_train_raw.shape[-1])
+    X_train_attack_flat = X_train_raw[attack_mask_train].reshape(-1, X_train_raw.shape[-1])
+    
+    # Only use z_attacked features for signal analysis
+    n_z_features = len(z_attacked_cols)
+    normal_features_train = X_train_normal_flat[:, :n_z_features]
+    attack_features_train = X_train_attack_flat[:, :n_z_features]
+    
+    attack_signal_strength = np.abs(np.mean(attack_features_train) - np.mean(normal_features_train))
+    print(f"Original attack signal strength (train only): {attack_signal_strength:.6f}")
+    
+    # Fit scaler on training data only
     scaler = StandardScaler()
-    scaler.fit(all_features)
+    scaler.fit(X_train_flat)
     
-    features_scaled = scaler.transform(all_features)
+    # Transform both train and test data
+    X_train_flat_scaled = scaler.transform(X_train_flat)
+    X_test_flat_scaled = scaler.transform(X_test_raw.reshape(-1, X_test_raw.shape[-1]))
     
-    normal_scaled = features_scaled[normal_mask, :len(z_attacked_cols)]
-    attack_scaled = features_scaled[attack_mask, :len(z_attacked_cols)]
+    # Reshape back to sequences
+    X_train = X_train_flat_scaled.reshape(X_train_raw.shape)
+    X_test = X_test_flat_scaled.reshape(X_test_raw.shape)
     
+    # === POST-SCALING ANALYSIS ===
     print(f"\nPOST-SCALING ANALYSIS:")
-    print(f"All data - Mean: {np.mean(features_scaled):.6f}, Std: {np.std(features_scaled):.6f}")
-    print(f"Normal scaled - Mean: {np.mean(normal_scaled):.6f}, Std: {np.std(normal_scaled):.6f}")
-    print(f"Attack scaled - Mean: {np.mean(attack_scaled):.6f}, Std: {np.std(attack_scaled):.6f}")
     
-    preserved_signal_strength = np.abs(np.mean(attack_scaled) - np.mean(normal_scaled))
+    # Analysis on scaled training data
+    X_train_normal_scaled = X_train[y_train == 0]
+    X_train_attack_scaled = X_train[y_train == 1]
+    
+    X_train_normal_flat_scaled = X_train_normal_scaled.reshape(-1, X_train.shape[-1])[:, :n_z_features]
+    X_train_attack_flat_scaled = X_train_attack_scaled.reshape(-1, X_train.shape[-1])[:, :n_z_features]
+    
+    print(f"Train data - Mean: {np.mean(X_train_flat_scaled):.6f}, Std: {np.std(X_train_flat_scaled):.6f}")
+    print(f"Train normal - Mean: {np.mean(X_train_normal_flat_scaled):.6f}, Std: {np.std(X_train_normal_flat_scaled):.6f}")
+    print(f"Train attack - Mean: {np.mean(X_train_attack_flat_scaled):.6f}, Std: {np.std(X_train_attack_flat_scaled):.6f}")
+    
+    preserved_signal_strength = np.abs(np.mean(X_train_attack_flat_scaled) - np.mean(X_train_normal_flat_scaled))
     print(f"Preserved attack signal: {preserved_signal_strength:.6f}")
     
     if attack_signal_strength > 0:
         print(f"Signal preservation ratio: {preserved_signal_strength/attack_signal_strength:.3f}")
     
-    normal_std = np.std(normal_scaled)
+    normal_std = np.std(X_train_normal_flat_scaled)
     attack_deviation = preserved_signal_strength / normal_std if normal_std > 0 else 0
     print(f"Attack detectability: {attack_deviation:.3f} standard deviations")
     
-    # Save scaler
-    joblib.dump(scaler, f"{sequence_dir}/scaler_zscore_all.pkl")
+    # Analysis on test data
+    X_test_normal_scaled = X_test[y_test == 0]
+    X_test_attack_scaled = X_test[y_test == 1]
     
-    # === BUILD SEQUENCES ===
-    print(f"\n🔗 BUILDING SEQUENCES:")
-    X, y_fdia = [], []
-    total_sequences = len(features_scaled) - sequence_length + 1
-
-    for i in range(total_sequences):
-        X_seq = features_scaled[i:i + sequence_length]
-        
-        # Label based on ANY attack in the sequence
-        y_seq = int(np.any(labels[i:i + sequence_length] == 1))
-        
-        X.append(X_seq)
-        y_fdia.append(y_seq)
-
-    X = np.array(X)
-    y_fdia = np.array(y_fdia)
-
-    print(f"Created {len(X)} sequences of length {sequence_length}")
-    print(f"Attack sequences: {np.sum(y_fdia)}/{len(y_fdia)} ({np.sum(y_fdia)/len(y_fdia)*100:.1f}%)")
-
-    # Split into train/test with stratification
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y_fdia, test_size=0.2, random_state=42, stratify=y_fdia
-    )
-
-    print(f"\nTRAIN/TEST SPLIT:")
-    print(f"Train: {len(X_train)} sequences, {np.sum(y_train)} attacks ({np.sum(y_train)/len(y_train)*100:.1f}%)")
-    print(f"Test:  {len(X_test)} sequences, {np.sum(y_test)} attacks ({np.sum(y_test)/len(y_test)*100:.1f}%)")
-
-    # Final validation of attack detectability in sequences
-    X_train_normal = X_train[y_train == 0]
-    X_test_attack = X_test[y_test == 1]
-    X_test_normal = X_test[y_test == 0]
+    test_normal_mean = np.mean(X_test_normal_scaled)
+    test_attack_mean = np.mean(X_test_attack_scaled)
     
-    print(f"\nSEQUENCE-LEVEL ATTACK ANALYSIS:")
-    train_normal_mean = np.mean(X_train_normal)
-    test_attack_mean = np.mean(X_test_attack)
-    test_normal_mean = np.mean(X_test_normal)
+    print(f"\nTEST DATA ANALYSIS:")
+    print(f"Test data - Mean: {np.mean(X_test_flat_scaled):.6f}, Std: {np.std(X_test_flat_scaled):.6f}")
+    print(f"Test normal sequences: {test_normal_mean:.6f}")
+    print(f"Test attack sequences: {test_attack_mean:.6f}")
     
-    print(f"Train normal sequences: {train_normal_mean:.6f}")
-    print(f"Test normal sequences:  {test_normal_mean:.6f}")
-    print(f"Test attack sequences:  {test_attack_mean:.6f}")
+    test_attack_strength = np.abs(test_attack_mean - test_normal_mean)
+    test_normal_std = np.std(X_test_normal_scaled)
+    test_detectability = test_attack_strength / test_normal_std if test_normal_std > 0 else 0
     
-    sequence_attack_strength = np.abs(test_attack_mean - test_normal_mean)
-    sequence_normal_std = np.std(X_test_normal)
-    sequence_detectability = sequence_attack_strength / sequence_normal_std if sequence_normal_std > 0 else 0
+    print(f"Test attack strength: {test_attack_strength:.6f}")
+    print(f"Test detectability: {test_detectability:.3f} standard deviations")
     
-    print(f"Sequence attack strength: {sequence_attack_strength:.6f}")
-    print(f"Sequence detectability: {sequence_detectability:.3f} standard deviations")
+    # Save scaler (fitted on train data only)
+    joblib.dump(scaler, f"{sequence_dir}/scaler_zscore_train_only.pkl")
+    
+    print(f"\n💾 SAVING SEQUENCES:")
+    print(f"Scaler fitted on: TRAIN DATA ONLY ({len(X_train_flat)} samples)")
+    print(f"No data leakage from test set")
 
-    # Save sequences with zscore suffix
+    # Save sequences
     np.save(f"{sequence_dir}/X_train.npy", X_train)
     np.save(f"{sequence_dir}/X_test.npy", X_test)
     np.save(f"{sequence_dir}/y_train_binary.npy", y_train)
@@ -142,22 +161,28 @@ def preprocess_with_zscore_all_data():
 
     # Create quality assessment
     quality_report = {
-        'preprocessing_method': 'zscore_all_data',
-        'scaler_fitted_on': 'all_data_normal_and_attack',
-        'original_attack_signal': float(attack_signal_strength),
-        'preserved_attack_signal': float(preserved_signal_strength),
+        'preprocessing_method': 'zscore_train_only_no_leakage',
+        'scaler_fitted_on': 'train_data_only',
+        'data_leakage_prevented': True,
+        'original_attack_signal_train': float(attack_signal_strength),
+        'preserved_attack_signal_train': float(preserved_signal_strength),
         'signal_preservation_ratio': float(preserved_signal_strength/attack_signal_strength) if attack_signal_strength > 0 else 0,
-        'attack_detectability_stddevs': float(attack_deviation),
-        'sequence_attack_detectability': float(sequence_detectability),
+        'train_attack_detectability_stddevs': float(attack_deviation),
+        'test_attack_detectability_stddevs': float(test_detectability),
         'train_sequences': len(X_train),
         'test_sequences': len(X_test),
         'train_attack_ratio': float(np.sum(y_train)/len(y_train)),
-        'test_attack_ratio': float(np.sum(y_test)/len(y_test))
+        'test_attack_ratio': float(np.sum(y_test)/len(y_test)),
+        'sequence_labeling': 'last_timestep'
     }
     
     import json
-    with open(f"{sequence_dir}/preprocessing_zscore_report.json", 'w') as f:
+    with open(f"{sequence_dir}/preprocessing_no_leakage_report.json", 'w') as f:
         json.dump(quality_report, f, indent=2)
+
+    print(f"\n✅ PREPROCESSING COMPLETE - NO DATA LEAKAGE")
+    print(f"Scaler file: scaler_zscore_train_only.pkl")
+    print(f"Report: preprocessing_no_leakage_report.json")
 
     return X_train, X_test, y_train, y_test
 
