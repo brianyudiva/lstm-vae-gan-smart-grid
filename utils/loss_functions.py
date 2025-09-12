@@ -44,6 +44,10 @@ def spectral_reconstruction_loss(y_true, y_pred):
 
 def robust_reconstruction_loss(y_true, y_pred, epsilon=0.01):
     """Simplified robust loss (Huber-style)"""
+    # Ensure both tensors have the same dtype
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    
     diff = y_true - y_pred
     squared_diff = tf.square(diff)
     abs_diff = tf.abs(diff)
@@ -75,6 +79,17 @@ def regularization_loss(encoder, decoder):
             l2_loss += tf.reduce_sum(tf.square(layer.bias))
     
     # Stronger regularization for better anomaly detection
+    return l2_loss * 0.01
+
+
+def model_regularization_loss(model):
+    """L2 regularization loss for a single model"""
+    l2_loss = 0
+    for layer in model.layers:
+        if hasattr(layer, 'kernel'):
+            l2_loss += tf.reduce_sum(tf.square(layer.kernel))
+        if hasattr(layer, 'bias') and layer.bias is not None:
+            l2_loss += tf.reduce_sum(tf.square(layer.bias))
     return l2_loss * 0.01
 
 

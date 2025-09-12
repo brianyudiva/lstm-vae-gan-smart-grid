@@ -3,18 +3,14 @@ import tensorflow as tf
 from tensorflow import keras
 import json
 import os
-import sys
 from datetime import datetime
 from sklearn.metrics import accuracy_score, average_precision_score
-
-sys.path.append('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid')
-
 from models.baseline_models import get_baseline_model
-from utils.loss_functions import vae_loss, combined_loss, wasserstein_loss
+from utils.loss_functions import beta_schedule, kl_loss, regularization_loss, robust_reconstruction_loss, vae_loss, combined_loss, wasserstein_loss
 from utils.utils import create_anomaly_labels
 
 
-def evaluate_model_accuracy(model, X_test, y_test):
+def evaluate_model(model, X_test, y_test):
     if hasattr(model, 'predict'):
         predictions = model.predict(X_test, verbose=0)
     else:
@@ -27,28 +23,20 @@ def evaluate_model_accuracy(model, X_test, y_test):
     recon_errors = np.mean(np.square(X_test - predictions), axis=(1, 2))
     
     pr_auc = average_precision_score(y_test, recon_errors)
+
+    # Calculate mean reconstruction error for normal data
+    normal_recon_error = np.mean(recon_errors[y_test == 0])
     
-    thresholds = np.linspace(np.min(recon_errors), np.max(recon_errors), 100)
-    best_accuracy = 0.0
-    best_threshold = 0.0
-    
-    for threshold in thresholds:
-        y_pred = (recon_errors > threshold).astype(int)
-        accuracy = accuracy_score(y_test, y_pred)
-        if accuracy > best_accuracy:
-            best_accuracy = accuracy
-            best_threshold = threshold
-    
-    return best_accuracy, best_threshold, pr_auc
+    return pr_auc, normal_recon_error
 
 
 def load_best_hyperparameters():
     return {
-        'latent_dim': 32,
-        'lstm_units_1': 32,
-        'lstm_units_2': 16,
-        'dense_units_1': 32,
-        'dense_units_2': 16,
+        'latent_dim': 16,
+        'lstm_units_1': 16,
+        'lstm_units_2': 8,
+        'dense_units_1': 16,
+        'dense_units_2': 8,
         'dropout_rate': 0.3,
         'l1_reg': 5e-4,
         'l2_reg': 1e-3,
@@ -57,7 +45,7 @@ def load_best_hyperparameters():
 
 
 def load_data():
-    data_path = '/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/data/sequences'
+    data_path = 'data/sequences'
     
     X_train = np.load(os.path.join(data_path, 'X_train.npy'))
     X_test = np.load(os.path.join(data_path, 'X_test.npy'))
@@ -99,14 +87,15 @@ def train_lstm_autoencoder(X_train, X_test, y_test, params, epochs=50, batch_siz
     steps_per_epoch = min(X_train.shape[0] // batch_size, 100)
     print(f"Training config: Epochs: {epochs}, Steps per epoch: {steps_per_epoch}, Batch size: {batch_size}")
     
-    best_accuracy = 0.0
+    best_pr_auc = 0.0
+    best_recon_error = float('inf')
     best_epoch = 0
     patience_counter = 0
     
     for epoch in range(epochs):
         epoch_losses = []
         
-        for step in range(steps_per_epoch):
+        for _ in range(steps_per_epoch):
             batch_idx = np.random.randint(0, X_train.shape[0], batch_size)
             batch_x = X_train[batch_idx]
             
@@ -116,13 +105,14 @@ def train_lstm_autoencoder(X_train, X_test, y_test, params, epochs=50, batch_siz
         avg_loss = np.mean(epoch_losses)
         
         if epoch % 5 == 0 or epoch == epochs - 1:
-            accuracy, threshold, pr_auc = evaluate_model_accuracy(autoencoder, X_test, y_test)
+            pr_auc, recon_error = evaluate_model(autoencoder, X_test, y_test)
             
-            print(f"Epoch {epoch + 1:3d}: Loss: {avg_loss:.4f}, Accuracy: {accuracy:.3f}, PR-AUC: {pr_auc:.3f}")
+            print(f"Epoch {epoch + 1:3d}: Loss: {avg_loss:.4f}, PR-AUC: {pr_auc:.3f}")
             
-            if accuracy > best_accuracy:
-                best_accuracy = accuracy
+            if pr_auc > best_pr_auc or recon_error < best_recon_error:
+                best_pr_auc = pr_auc
                 best_epoch = epoch
+                best_recon_error = recon_error
                 patience_counter = 0
 
                 autoencoder.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/lstm_autoencoder_full.h5')
@@ -131,19 +121,19 @@ def train_lstm_autoencoder(X_train, X_test, y_test, params, epochs=50, batch_siz
             else:
                 patience_counter += 5
             
-            if patience_counter >= 25:
+            if patience_counter >= 15:
                 print(f"Early stopping at epoch {epoch + 1}")
                 break
         elif epoch % 1 == 0:
             print(f"Epoch {epoch + 1:3d}: Loss: {avg_loss:.4f}")
     
-    print(f"Best accuracy: {best_accuracy:.3f} at epoch {best_epoch + 1}")
+    print(f"Best PR-AUC: {best_pr_auc:.3f} at epoch {best_epoch + 1}")
     
     class DummyHistory:
         def __init__(self):
             self.history = {'loss': epoch_losses}
     
-    return DummyHistory(), autoencoder, best_accuracy
+    return DummyHistory(), autoencoder, best_pr_auc
 
 
 def train_vae_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
@@ -155,7 +145,7 @@ def train_vae_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
     
     model_params = {
         'latent_dim': params['latent_dim'],
-        'dense_units': [128, 64, 32], 
+        'dense_units': [32, 16], 
         'dropout_rate': params['dropout_rate'],
         'l1_reg': params['l1_reg'],
         'l2_reg': params['l2_reg']
@@ -168,6 +158,9 @@ def train_vae_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
         loss=lambda y_true, y_pred: vae_loss(y_true, y_pred, encoder, params['latent_dim'], beta=1.0)
     )
     
+    gen_optimizer = keras.optimizers.Adam(learning_rate=params['learning_rate'])
+    decoder.compile(optimizer=gen_optimizer, loss='mse')
+    
     disc_optimizer = keras.optimizers.Adam(learning_rate=params['learning_rate'] * 0.5)
     discriminator.compile(optimizer=disc_optimizer, loss='binary_crossentropy', metrics=['accuracy'])
     
@@ -176,9 +169,16 @@ def train_vae_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
     
     vae_losses = []
     disc_losses = []
-    best_accuracy = 0.0
+    best_pr_auc = 0.0
+    best_recon_error = float('inf')
     best_epoch = 0
     patience_counter = 0
+    
+    # Add missing training parameters
+    kl_weight = 1.0
+    beta_warmup_epochs = epochs // 4
+    reconstruction_weight = 1.0
+    regularization_weight = 0.01
     
     for epoch in range(epochs):
         epoch_vae_losses = []
@@ -187,29 +187,72 @@ def train_vae_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
         for step in range(steps_per_epoch):
             batch_idx = np.random.randint(0, X_train.shape[0], batch_size)
             batch_x = X_train[batch_idx]
+
+            # === Train Discriminator ===
+            with tf.GradientTape() as disc_tape:
+                real_pred = discriminator(batch_x, training=True)
+                real_labels = tf.ones_like(real_pred)
+                real_loss = tf.keras.losses.binary_crossentropy(real_labels, real_pred)
+                
+                z_mean, z_log_var, z = encoder(batch_x, training=False)
+                fake_batch = decoder(z, training=False)
+                fake_pred = discriminator(fake_batch, training=True)
+                fake_labels = tf.zeros_like(fake_pred)
+                fake_loss = tf.keras.losses.binary_crossentropy(fake_labels, fake_pred)
+                
+                disc_loss = tf.reduce_mean(real_loss + fake_loss)
             
-            vae_loss_val = vae.train_on_batch(batch_x, batch_x)
-            epoch_vae_losses.append(vae_loss_val)
+            disc_grads = disc_tape.gradient(disc_loss, discriminator.trainable_weights)
+            if disc_grads:
+                disc_grads = [tf.clip_by_norm(g, 1.0) for g in disc_grads]
+                disc_optimizer.apply_gradients(zip(disc_grads, discriminator.trainable_weights))
             
-            z_mean, z_log_var, z = encoder.predict(batch_x, verbose=0)
-            fake_data = decoder.predict(z, verbose=0)
+            # === Train Generator (VAE) ===
+            with tf.GradientTape() as gen_tape:
+                z_mean, z_log_var, z = encoder(batch_x, training=True)
+                reconstructed = decoder(z, training=True)
+                
+                recon_loss_val = robust_reconstruction_loss(batch_x, reconstructed)
+                
+                # Gradual KL weight increase (beta-VAE approach)
+                kl_beta = beta_schedule(epoch, epochs, 
+                                        max_beta=kl_weight, 
+                                        warmup_epochs=beta_warmup_epochs)
+                kl_loss_val = kl_beta * kl_loss(z_mean, z_log_var)
+                
+                reg_loss_val = regularization_loss(encoder, decoder)
+                
+                gen_pred = discriminator(reconstructed, training=False)
+                gen_labels = tf.ones_like(gen_pred)
+                adversarial_loss = tf.reduce_mean(tf.keras.losses.binary_crossentropy(gen_labels, gen_pred))
+                
+                gen_loss = (reconstruction_weight * recon_loss_val +
+                            kl_loss_val +
+                            regularization_weight * reg_loss_val +
+                            0.1 * adversarial_loss)  # Small adversarial weight to start
+                
+            gen_grads = gen_tape.gradient(gen_loss, encoder.trainable_weights + decoder.trainable_weights)
+            if gen_grads:
+                gen_grads = [tf.clip_by_norm(g, 1.0) for g in gen_grads]
+                gen_optimizer.apply_gradients(zip(gen_grads, encoder.trainable_weights + decoder.trainable_weights))
             
-            d_loss_real = discriminator.train_on_batch(batch_x, np.ones((len(batch_x), 1)))
-            d_loss_fake = discriminator.train_on_batch(fake_data, np.zeros((len(fake_data), 1)))
-            d_loss = 0.5 * (d_loss_real[0] + d_loss_fake[0])
-            epoch_disc_losses.append(d_loss)
+            # Track losses
+            epoch_vae_losses.append(float(gen_loss.numpy()))
+            epoch_disc_losses.append(float(disc_loss.numpy()))
         
+        # Calculate average losses for this epoch
         avg_vae_loss = np.mean(epoch_vae_losses)
         avg_disc_loss = np.mean(epoch_disc_losses)
         vae_losses.append(avg_vae_loss)
         disc_losses.append(avg_disc_loss)
         
         if epoch % 5 == 0 or epoch == epochs - 1:
-            accuracy, threshold, pr_auc = evaluate_model_accuracy(vae, X_test, y_test)
-            print(f"Epoch {epoch + 1:3d}: Accuracy: {accuracy:.3f}, PR-AUC: {pr_auc:.3f}, VAE Loss: {avg_vae_loss:.4f}, Disc Loss: {avg_disc_loss:.4f}")
+            pr_auc, recon_error = evaluate_model(vae, X_test, y_test)
+            print(f"Epoch {epoch + 1:3d}: PR-AUC: {pr_auc:.3f}, VAE Loss: {avg_vae_loss:.4f}, Disc Loss: {avg_disc_loss:.4f}")
             
-            if accuracy > best_accuracy:
-                best_accuracy = accuracy
+            if pr_auc > best_pr_auc or recon_error < best_recon_error:
+                best_pr_auc = pr_auc
+                best_recon_error = recon_error
                 best_epoch = epoch
                 patience_counter = 0
 
@@ -217,18 +260,19 @@ def train_vae_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
                 decoder.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/vae_gan_decoder.h5')
                 discriminator.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/vae_gan_discriminator.h5')
                 vae.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/vae_gan_full.h5')
+                print(f"Model saved! PR-AUC: {pr_auc:.4f}, Recon Error: {recon_error:.6f}")
             else:
                 patience_counter += 5
             
-            if patience_counter >= 25:
+            if patience_counter >= 15:
                 print(f"Early stopping at epoch {epoch + 1}")
                 break
         elif epoch % 1 == 0:
             print(f"Epoch {epoch + 1:3d}: VAE Loss: {avg_vae_loss:.4f}, Disc Loss: {avg_disc_loss:.4f}")
     
-    print(f"Best accuracy: {best_accuracy:.3f} at epoch {best_epoch + 1}")
+    print(f"Best PR-AUC: {best_pr_auc:.3f} at epoch {best_epoch + 1}")
     
-    return {'vae_losses': vae_losses, 'disc_losses': disc_losses}, vae, best_accuracy
+    return {'vae_losses': vae_losses, 'disc_losses': disc_losses}, vae, best_pr_auc
 
 
 def train_lstm_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
@@ -262,7 +306,8 @@ def train_lstm_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
     
     gen_losses = []
     disc_losses = []
-    best_accuracy = 0.0
+    best_pr_auc = 0.0
+    best_recon_error = float('inf')
     best_epoch = 0
     patience_counter = 0
     
@@ -274,15 +319,56 @@ def train_lstm_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
             batch_idx = np.random.randint(0, X_train.shape[0], batch_size)
             batch_x = X_train[batch_idx]
             
-            gen_loss = generator.train_on_batch(batch_x, batch_x)
-            epoch_gen_losses.append(gen_loss)
+            # === Train Generator (Autoencoder) ===
+            with tf.GradientTape() as gen_tape:
+                # Get latent representation
+                latent = encoder(batch_x, training=True)
+                if isinstance(latent, list):  # Handle VAE-style encoder output
+                    latent = latent[2] if len(latent) > 2 else latent[0]
+                
+                # Reconstruct data
+                reconstructed = decoder(latent, training=True)
+                
+                # Reconstruction loss
+                gen_loss = tf.reduce_mean(tf.keras.losses.mse(batch_x, reconstructed))
+                
+                # Add regularization
+                reg_loss = regularization_loss(encoder, decoder)
+                gen_loss += 0.01 * reg_loss
             
-            fake_data = generator.predict(batch_x, verbose=0)
+            # Apply generator gradients
+            gen_grads = gen_tape.gradient(gen_loss, encoder.trainable_weights + decoder.trainable_weights)
+            if gen_grads:
+                gen_grads = [tf.clip_by_norm(g, 1.0) for g in gen_grads]
+                gen_optimizer.apply_gradients(zip(gen_grads, encoder.trainable_weights + decoder.trainable_weights))
             
-            d_loss_real = discriminator.train_on_batch(batch_x, np.ones((len(batch_x), 1)))
-            d_loss_fake = discriminator.train_on_batch(fake_data, np.zeros((len(fake_data), 1)))
-            d_loss = 0.5 * (d_loss_real[0] + d_loss_fake[0])
-            epoch_disc_losses.append(d_loss)
+            # === Train Discriminator ===
+            with tf.GradientTape() as disc_tape:
+                # Real data through discriminator
+                real_pred = discriminator(batch_x, training=True)
+                real_labels = tf.ones_like(real_pred)
+                real_loss = tf.keras.losses.binary_crossentropy(real_labels, real_pred)
+                
+                # Fake data through discriminator
+                latent = encoder(batch_x, training=False)
+                if isinstance(latent, list):
+                    latent = latent[2] if len(latent) > 2 else latent[0]
+                fake_batch = decoder(latent, training=False)
+                fake_pred = discriminator(fake_batch, training=True)
+                fake_labels = tf.zeros_like(fake_pred)
+                fake_loss = tf.keras.losses.binary_crossentropy(fake_labels, fake_pred)
+                
+                disc_loss = tf.reduce_mean(real_loss + fake_loss)
+            
+            # Apply discriminator gradients
+            disc_grads = disc_tape.gradient(disc_loss, discriminator.trainable_weights)
+            if disc_grads:
+                disc_grads = [tf.clip_by_norm(g, 1.0) for g in disc_grads]
+                disc_optimizer.apply_gradients(zip(disc_grads, discriminator.trainable_weights))
+            
+            # Track losses
+            epoch_gen_losses.append(float(gen_loss.numpy()))
+            epoch_disc_losses.append(float(disc_loss.numpy()))
         
         avg_gen_loss = np.mean(epoch_gen_losses)
         avg_disc_loss = np.mean(epoch_disc_losses)
@@ -290,11 +376,12 @@ def train_lstm_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
         disc_losses.append(avg_disc_loss)
         
         if epoch % 5 == 0 or epoch == epochs - 1:
-            accuracy, threshold, pr_auc = evaluate_model_accuracy(generator, X_test, y_test)
-            print(f"Epoch {epoch + 1:3d}: Accuracy: {accuracy:.3f}, PR-AUC: {pr_auc:.3f}, Gen Loss: {avg_gen_loss:.4f}, Disc Loss: {avg_disc_loss:.4f}")
+            pr_auc, recon_error = evaluate_model(generator, X_test, y_test)
+            print(f"Epoch {epoch + 1:3d}: PR-AUC: {pr_auc:.3f}, Gen Loss: {avg_gen_loss:.4f}, Disc Loss: {avg_disc_loss:.4f}")
             
-            if accuracy > best_accuracy:
-                best_accuracy = accuracy
+            if pr_auc > best_pr_auc or recon_error < best_recon_error:
+                best_pr_auc = pr_auc
+                best_recon_error = recon_error
                 best_epoch = epoch
                 patience_counter = 0
 
@@ -302,6 +389,7 @@ def train_lstm_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
                 decoder.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/lstm_gan_decoder.h5')
                 discriminator.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/lstm_gan_discriminator.h5')
                 generator.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/lstm_gan_generator.h5')
+                print(f"  🎯 Model saved! PR-AUC: {pr_auc:.4f}, Recon Error: {recon_error:.6f}")
             else:
                 patience_counter += 5
             
@@ -311,86 +399,9 @@ def train_lstm_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
         elif epoch % 1 == 0:
             print(f"Epoch {epoch + 1:3d}: Gen Loss: {avg_gen_loss:.4f}, Disc Loss: {avg_disc_loss:.4f}")
     
-    print(f"Best accuracy: {best_accuracy:.3f} at epoch {best_epoch + 1}")
+    print(f"Best PR-AUC: {best_pr_auc:.3f} at epoch {best_epoch + 1}")
     
-    return {'gen_losses': gen_losses, 'disc_losses': disc_losses}, generator, best_accuracy
-
-
-def train_lstm_vae(X_train, X_test, y_test, params, epochs=50, batch_size=32):
-    print("\n" + "="*60)
-    print("TRAINING LSTM-VAE")
-    print("="*60)
-    
-    input_shape = (X_train.shape[1], X_train.shape[2])
-    
-    model_params = {
-        'latent_dim': params['latent_dim'],
-        'lstm_units_1': params['lstm_units_1'],
-        'lstm_units_2': params['lstm_units_2'],
-        'dense_units_1': params['dense_units_1'],
-        'dense_units_2': params['dense_units_2'],
-        'dropout_rate': params['dropout_rate'],
-        'l1_reg': params['l1_reg'],
-        'l2_reg': params['l2_reg']
-    }
-    
-    encoder, decoder, vae = get_baseline_model('lstm_vae', input_shape, **model_params)
-    
-    optimizer = keras.optimizers.Adam(learning_rate=params['learning_rate'])
-    vae.compile(
-        optimizer=optimizer,
-        loss=lambda y_true, y_pred: vae_loss(y_true, y_pred, encoder, params['latent_dim'], beta=1.0)
-    )
-    
-    steps_per_epoch = min(X_train.shape[0] // batch_size, 100)
-    print(f"Training config: Epochs: {epochs}, Steps per epoch: {steps_per_epoch}, Batch size: {batch_size}")
-    
-    best_accuracy = 0.0
-    best_epoch = 0
-    patience_counter = 0
-    
-    for epoch in range(epochs):
-        epoch_losses = []
-        
-        for step in range(steps_per_epoch):
-            batch_idx = np.random.randint(0, X_train.shape[0], batch_size)
-            batch_x = X_train[batch_idx]
-            
-            loss = vae.train_on_batch(batch_x, batch_x)
-            epoch_losses.append(loss)
-        
-        avg_loss = np.mean(epoch_losses)
-        
-        if epoch % 5 == 0 or epoch == epochs - 1:
-            accuracy, threshold, pr_auc = evaluate_model_accuracy(vae, X_test, y_test)
-            
-            print(f"Epoch {epoch + 1:3d}: Loss: {avg_loss:.4f}, Accuracy: {accuracy:.3f}, PR-AUC: {pr_auc:.3f}")
-            
-            if accuracy > best_accuracy:
-                best_accuracy = accuracy
-                best_epoch = epoch
-                patience_counter = 0
-
-                encoder.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/lstm_vae_encoder.h5')
-                decoder.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/lstm_vae_decoder.h5')
-                vae.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/lstm_vae_full.h5')
-            else:
-                patience_counter += 5
-            
-            if patience_counter >= 25:
-                print(f"Early stopping at epoch {epoch + 1}")
-                break
-        elif epoch % 1 == 0:
-            print(f"Epoch {epoch + 1:3d}: Loss: {avg_loss:.4f}")
-    
-    print(f"Best accuracy: {best_accuracy:.3f} at epoch {best_epoch + 1}")
-    
-    class DummyHistory:
-        def __init__(self):
-            self.history = {'loss': epoch_losses}
-    
-    return DummyHistory(), vae, best_accuracy
-
+    return {'gen_losses': gen_losses, 'disc_losses': disc_losses}, generator, best_pr_auc
 
 def main():    
     print("Starting baseline model training...")
@@ -407,7 +418,6 @@ def main():
         ('lstm_autoencoder', train_lstm_autoencoder),
         ('vae_gan', train_vae_gan), 
         ('lstm_gan', train_lstm_gan),
-        ('lstm_vae', train_lstm_vae)
     ]
     
     for model_name, train_func in models_to_train:
