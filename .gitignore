@@ -145,7 +145,8 @@ logs/
 *.csv
 *.xlsx
 *.xls
-data/
+data/processed/
+data/sequences/
 datasets/
 
 # Output files
