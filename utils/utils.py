@@ -23,19 +23,3 @@ def convert_to_json_serializable(obj):
         return int(obj)
     else:
         return obj
-
-
-def create_anomaly_labels(data_normal, data_anomaly):
-    """
-    Create binary labels for anomaly detection
-    
-    Args:
-        data_normal: Normal/clean data samples
-        data_anomaly: Anomaly/attack data samples
-        
-    Returns:
-        Combined labels array (0 for normal, 1 for anomaly)
-    """
-    normal_labels = np.zeros(len(data_normal))
-    anomaly_labels = np.ones(len(data_anomaly))
-    return np.concatenate([normal_labels, anomaly_labels])

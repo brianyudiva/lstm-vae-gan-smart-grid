@@ -26,7 +26,6 @@ def build_lstm_autoencoder(input_shape, latent_dim=32, lstm_units_1=32, lstm_uni
     # === ENCODER ===
     encoder_input = layers.Input(shape=input_shape, name='encoder_input')
     
-    # LSTM layers
     x = layers.LSTM(
         lstm_units_1,
         return_sequences=True,
@@ -45,13 +44,6 @@ def build_lstm_autoencoder(input_shape, latent_dim=32, lstm_units_1=32, lstm_uni
         recurrent_dropout=dropout_rate
     )(x)
     
-    # Dense layers
-    # x = layers.Dense(dense_units_1, activation='relu', kernel_regularizer=l1_l2(l1_reg, l2_reg))(x)
-    # x = layers.Dropout(dropout_rate * 0.67)(x)
-    # x = layers.Dense(dense_units_2, activation='relu', kernel_regularizer=l1_l2(l1_reg, l2_reg))(x)
-    # x = layers.Dropout(dropout_rate * 0.67)(x)
-    
-    # Latent representation (deterministic)
     latent_code = layers.Dense(latent_dim, activation='linear', name='latent_code', 
                          kernel_regularizer=l1_l2(l1_reg, l2_reg))(x)
     
@@ -60,17 +52,8 @@ def build_lstm_autoencoder(input_shape, latent_dim=32, lstm_units_1=32, lstm_uni
     # === DECODER ===
     decoder_input = layers.Input(shape=(latent_dim,), name='decoder_input')
     
-    # Expand latent to dense
-    # x_dec = layers.Dense(dense_units_2, activation='relu', kernel_regularizer=l1_l2(l1_reg, l2_reg))(decoder_input)
-    # x_dec = layers.Dropout(dropout_rate * 0.67)(x_dec)
-    # x_dec = layers.Dense(dense_units_1, activation='relu', kernel_regularizer=l1_l2(l1_reg, l2_reg))(x_dec)
-    # x_dec = layers.Dropout(dropout_rate * 0.67)(x_dec)
-    
-    # Prepare for LSTM
-    # x_dec = layers.Dense(lstm_units_2, activation='relu', kernel_regularizer=l1_l2(l1_reg, l2_reg))(x_dec)
     x_dec = layers.RepeatVector(input_shape[0])(decoder_input)
     
-    # LSTM layers
     x_dec = layers.LSTM(
         lstm_units_2,
         return_sequences=True,
@@ -89,7 +72,6 @@ def build_lstm_autoencoder(input_shape, latent_dim=32, lstm_units_1=32, lstm_uni
         recurrent_dropout=dropout_rate
     )(x_dec)
     
-    # Output layer
     decoder_output = layers.TimeDistributed(
         layers.Dense(input_shape[1], activation='linear', kernel_regularizer=l1_l2(l1_reg, l2_reg))
     )(x_dec)
@@ -108,7 +90,7 @@ def build_vae_gan(input_shape, latent_dim=32, dense_units=[32, 16],
     
     flattened_dim = input_shape[0] * input_shape[1]
     
-    # === VAE ENCODER ===
+    # === ENCODER ===
     encoder_input = layers.Input(shape=input_shape, name='vae_encoder_input')
     x = layers.Flatten()(encoder_input)
     
@@ -116,16 +98,13 @@ def build_vae_gan(input_shape, latent_dim=32, dense_units=[32, 16],
         x = layers.Dense(units, activation='relu', kernel_regularizer=l1_l2(l1_reg, l2_reg))(x)
         x = layers.Dropout(dropout_rate)(x)
     
-    # VAE latent parameters
     z_mean = layers.Dense(latent_dim, name='z_mean', kernel_regularizer=l1_l2(l1_reg, l2_reg))(x)
     z_log_var = layers.Dense(latent_dim, name='z_log_var', kernel_regularizer=l1_l2(l1_reg, l2_reg))(x)
-    
-    # Sampling layer
     z = SamplingLayer(name='sampling')([z_mean, z_log_var])
     
     encoder = models.Model(encoder_input, [z_mean, z_log_var, z], name='vae_encoder')
     
-    # === VAE DECODER ===
+    # === DECODER ===
     decoder_input = layers.Input(shape=(latent_dim,), name='vae_decoder_input')
     x_dec = decoder_input
     
@@ -138,7 +117,7 @@ def build_vae_gan(input_shape, latent_dim=32, dense_units=[32, 16],
     
     decoder = models.Model(decoder_input, decoder_output, name='vae_decoder')
     
-    # === GAN DISCRIMINATOR ===
+    # === DISCRIMINATOR ===
     discriminator_input = layers.Input(shape=input_shape, name='discriminator_input')
     x_disc = layers.Flatten()(discriminator_input)
     
@@ -149,7 +128,7 @@ def build_vae_gan(input_shape, latent_dim=32, dense_units=[32, 16],
     discriminator_output = layers.Dense(1, activation='sigmoid', name='discriminator_output')(x_disc)
     discriminator = models.Model(discriminator_input, discriminator_output, name='discriminator')
     
-    # === COMBINED VAE ===
+    # === COMBINED ===
     vae_output = decoder(encoder(encoder_input)[2])
     vae = models.Model(encoder_input, vae_output, name='vae_gan')
     
@@ -160,7 +139,7 @@ def build_lstm_gan(input_shape, latent_dim=32, lstm_units_1=32, lstm_units_2=16,
                    dense_units_1=32, dense_units_2=16, dropout_rate=0.3,
                    l1_reg=5e-4, l2_reg=1e-3):
     
-    # === LSTM ENCODER ===
+    # === ENCODER ===
     encoder_input = layers.Input(shape=input_shape, name='lstm_gan_encoder_input')
     
     x = layers.LSTM(
@@ -186,7 +165,7 @@ def build_lstm_gan(input_shape, latent_dim=32, lstm_units_1=32, lstm_units_2=16,
     
     encoder = models.Model(encoder_input, latent_code, name='lstm_gan_encoder')
     
-    # === LSTM DECODER (GENERATOR) ===
+    # === DECODER ===
     decoder_input = layers.Input(shape=(latent_dim,), name='lstm_gan_decoder_input')
 
     x_dec = layers.RepeatVector(input_shape[0])(decoder_input)
@@ -215,7 +194,7 @@ def build_lstm_gan(input_shape, latent_dim=32, lstm_units_1=32, lstm_units_2=16,
     
     decoder = models.Model(decoder_input, decoder_output, name='lstm_gan_decoder')
     
-    # === GAN DISCRIMINATOR ===
+    # === DISCRIMINATOR ===
     discriminator_input = layers.Input(shape=input_shape, name='lstm_gan_discriminator_input')
 
     x_disc = layers.Flatten()(discriminator_input)

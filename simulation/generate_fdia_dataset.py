@@ -39,16 +39,13 @@ class StateEstimationFDIA:
             'campaign_progress': 0,
             'target_states': [],
             'buildup_factor': 1.0,
-            'last_attack_time': -100  # Initialize far in the past
+            'last_attack_time': -100
         }
         
     def extract_system_state(self):
-        """Extract true system state (voltage magnitudes and angles)"""
         try:
-            # Get voltage magnitudes (per unit)
             vmag = np.array(dss.Circuit.AllBusMagPu())
             
-            # Get voltage angles - use bus iteration method
             vang = []
             bus_names = dss.Circuit.AllBusNames()
             
@@ -58,14 +55,13 @@ class StateEstimationFDIA:
                 # Use Bus.puVmagAngle which returns [mag1, ang1, mag2, ang2, ...]
                 vm_ang = dss.Bus.puVmagAngle()
                 if len(vm_ang) >= 2:
-                    angle_deg = vm_ang[1]  # Second element is angle in degrees
-                    vang.append(np.deg2rad(angle_deg))  # Convert to radians
+                    angle_deg = vm_ang[1] 
+                    vang.append(np.deg2rad(angle_deg))
                 else:
                     vang.append(0.0)  # Default angle if no data
             
             vang = np.array(vang)
             
-            # Combine into state vector [V_mag, V_ang]
             state_vector = np.concatenate([vmag, vang])
             
             return state_vector
@@ -75,23 +71,17 @@ class StateEstimationFDIA:
             return None
     
     def compute_measurement_jacobian(self, state_vector):
-        """
-        Compute realistic Jacobian matrix H for measurement function z = h(x)
-        Creates better coupling between voltage magnitudes and angles
-        """
         n_states = len(state_vector)
         n_measurements = n_states
         n_vmag = n_states // 2
         
-        # Start with identity matrix
         H = np.eye(n_measurements, n_states)
         
-        # Create realistic power system coupling
         for i in range(n_vmag):
             for j in range(n_vmag):
                 if i != j:
                     # Voltage magnitude measurements depend on neighboring bus angles
-                    if abs(i - j) <= 2:  # Neighboring buses
+                    if abs(i - j) <= 2: 
                         coupling_strength = 0.3 / (abs(i - j) + 1)
                         if j + n_vmag < n_states:
                             H[i, j + n_vmag] = coupling_strength
@@ -101,35 +91,29 @@ class StateEstimationFDIA:
                         coupling_strength = 0.2 / (abs(i - j) + 1)
                         H[i + n_vmag, j] = coupling_strength
         
-        # Add stronger self-coupling between magnitude and angle of same bus
         for i in range(n_vmag):
             if i + n_vmag < n_states and i + n_vmag < n_measurements:
-                H[i, i + n_vmag] = 0.6  # Magnitude depends on local angle
-                H[i + n_vmag, i] = 0.4  # Angle depends on local magnitude
+                H[i, i + n_vmag] = 0.6
+                H[i + n_vmag, i] = 0.4 
         
-        # Add realistic measurement correlation (reduced variation for more consistent daily patterns)
-        correlation_factor = np.random.normal(1.0, 0.005, size=(n_measurements, n_states))  # Reduced from 0.03 to 0.005
+        # Add realistic measurement correlation
+        correlation_factor = np.random.normal(1.0, 0.005, size=(n_measurements, n_states))
         H = H * correlation_factor
         
-        # Ensure H is well-conditioned
         # Add small diagonal perturbation to avoid singularity
         H += np.eye(n_measurements, n_states) * 0.01
         
         return H
     
     def generate_measurements(self, state_vector, add_noise=True):
-        """Generate measurements z = Hx + e"""
         if state_vector is None:
             return None, None
             
-        # Compute measurement Jacobian
         H = self.compute_measurement_jacobian(state_vector)
         
-        # Generate measurements
         z_true = H @ state_vector
         
         if add_noise:
-            # Add Gaussian measurement noise
             noise = np.random.normal(0, CONFIG['measurement_noise_std'], size=z_true.shape)
             z_measured = z_true + noise
         else:
@@ -152,86 +136,63 @@ class StateEstimationFDIA:
         campaign_attack = False
         time_since_last_attack = timestep - self.attack_state['last_attack_time']
         
-        # Start new campaign occasionally (every few days)
-        if (self.attack_state['active_campaign'] is None and 
-            np.random.random() < 0.02 and  # 2% chance per timestep
-            time_since_last_attack > 48):  # At least 48 hours gap
-            
-            # Initiate new attack campaign
+        if (self.attack_state['active_campaign'] is None and np.random.random() < 0.02 and time_since_last_attack > 48): 
             self.attack_state['active_campaign'] = 'gradual_buildup'
             self.attack_state['campaign_progress'] = 0
-            self.attack_state['target_states'] = np.random.choice(
-                range(n_vmag), size=min(3, n_vmag//2), replace=False
-            ).tolist()
-            self.attack_state['buildup_factor'] = 0.1  # Start very subtle
+            self.attack_state['target_states'] = np.random.choice(range(n_vmag), size=min(3, n_vmag//2), replace=False).tolist()
+            self.attack_state['buildup_factor'] = 0.1
             campaign_attack = True
             
-        # Continue existing campaign
         elif self.attack_state['active_campaign'] is not None:
             self.attack_state['campaign_progress'] += 1
-            # Gradually build up attack strength
-            self.attack_state['buildup_factor'] = min(
-                2.0, 0.1 + (self.attack_state['campaign_progress'] * 0.05)
-            )
+            self.attack_state['buildup_factor'] = min(2.0, 0.1 + (self.attack_state['campaign_progress'] * 0.05))
             
-            # Campaign attack with some probability
-            if np.random.random() < 0.4:  # 40% chance during active campaign
+            if np.random.random() < 0.4:
                 campaign_attack = True
                 
-            # End campaign after some time or randomly
-            if (self.attack_state['campaign_progress'] > 20 or 
-                np.random.random() < 0.1):  # 10% chance to end per step
+            if (self.attack_state['campaign_progress'] > 20 or np.random.random() < 0.1):
                 self.attack_state['active_campaign'] = None
                 
         if campaign_attack:
             self.attack_state['last_attack_time'] = timestep
         
         # === STRATEGY 1: TIME-AWARE STEALTH ===
-        # Hide attacks during high-activity periods when natural variations are higher
         stealth_multiplier = 1.0
         if 7 <= hour_of_day <= 9 or 17 <= hour_of_day <= 20:  # Peak hours
-            stealth_multiplier = 2.0  # More aggressive during natural variation peaks
+            stealth_multiplier = 2.0
         elif 22 <= hour_of_day or hour_of_day <= 5:  # Low activity hours
-            stealth_multiplier = 0.4  # Much more subtle when system is stable
+            stealth_multiplier = 0.4
         
-        # Apply campaign buildup factor
         if campaign_attack:
             stealth_multiplier *= self.attack_state['buildup_factor']
         
         # === STRATEGY 2: MEASUREMENT-NOISE CAMOUFLAGE ===
-        # Scale attacks to blend with measurement noise patterns
         if measurement_history is not None and len(measurement_history) > 5:
-            # Estimate recent measurement noise variance
             recent_measurements = np.array(measurement_history[-5:])
             measurement_variance = np.var(recent_measurements, axis=0)
             noise_adaptive_scaling = np.sqrt(measurement_variance) / CONFIG['measurement_noise_std']
-            noise_adaptive_scaling = np.clip(noise_adaptive_scaling, 0.3, 3.0)  # Reasonable bounds
+            noise_adaptive_scaling = np.clip(noise_adaptive_scaling, 0.3, 3.0)
         else:
             noise_adaptive_scaling = np.ones(n_measurements)
         
         # === STRATEGY 3: SMART STATE TARGETING ===
         if campaign_attack and self.attack_state['target_states']:
-            # Use pre-selected campaign targets
             attacked_indices = np.array(self.attack_state['target_states'])
             attack_mask = np.zeros(n_states, dtype=bool)
             attack_mask[attacked_indices] = True
         else:
-            # Target states with naturally higher variance to blend better
-            state_vulnerability = np.abs(H).std(axis=0)  # States with more measurement coupling
+            state_vulnerability = np.abs(H).std(axis=0)
             vulnerability_weights = state_vulnerability / np.max(state_vulnerability)
             
-            # Prefer attacking less observable states (counter-intuitive but stealthier)
-            observability_penalty = 1.0 / (vulnerability_weights + 0.1)  # Inverse relationship
+            observability_penalty = 1.0 / (vulnerability_weights + 0.1)
             target_probs = observability_penalty / np.sum(observability_penalty)
             
-            # Generate sophisticated attack mask
-            attack_mask = np.random.random(n_states) < (target_probs * 0.6)  # Reduce overall attack rate
+            attack_mask = np.random.random(n_states) < (target_probs * 0.6)
             attacked_indices = np.where(attack_mask)[0]
         
         n_attacked_states = len(attacked_indices)
         
         if n_attacked_states == 0:
-            # Target least observable state when forced to attack
             state_vulnerability = np.abs(H).std(axis=0)
             vulnerability_weights = state_vulnerability / np.max(state_vulnerability)
             least_observable_idx = np.argmin(vulnerability_weights[:n_vmag])
@@ -242,57 +203,28 @@ class StateEstimationFDIA:
         c = np.zeros(n_states)
         
         # === STRATEGY 4: CORRELATED PERTURBATIONS MIMICKING NATURAL VARIATIONS ===
-        # Generate attack that follows natural system correlation patterns
         if len(attacked_indices) > 1:
-            # Create correlation matrix based on measurement coupling
-            correlation_matrix = np.corrcoef(H.T)  # State-to-state correlation
+            correlation_matrix = np.corrcoef(H.T)
             correlation_matrix = np.nan_to_num(correlation_matrix, 0)
             
-            # Primary attack on most strategic state
-            strategic_idx = attacked_indices[0]  # Use first target for campaigns
+            strategic_idx = attacked_indices[0] 
             base_attack = np.random.normal(0, attack_magnitude * stealth_multiplier * 0.7)
             c[strategic_idx] = base_attack
             
-            # Correlated attacks on other states
             for idx in attacked_indices[1:]:
                 correlation_factor = correlation_matrix[strategic_idx, idx]
                 correlated_noise = np.random.normal(0, attack_magnitude * 0.2)
                 c[idx] = base_attack * abs(correlation_factor) * 0.6 + correlated_noise
         else:
-            # Single state attack - make it very subtle
             idx = attacked_indices[0]
             c[idx] = np.random.normal(0, attack_magnitude * stealth_multiplier * 0.5)
         
         # === STRATEGY 5: MEASUREMENT-SPACE CAMOUFLAGE ===
-        # Compute initial attack vector
         attack_vector = H @ c
         
-        # Adaptive scaling based on measurement noise patterns
         for i in range(len(attack_vector)):
             noise_scale = noise_adaptive_scaling[i] if i < len(noise_adaptive_scaling) else 1.0
             attack_vector[i] *= noise_scale
-        
-        # # === STRATEGY 6: RESIDUAL MINIMIZATION WITH SPARSITY ===
-        # # Fine-tune attack to minimize detection while maintaining impact
-        # try:
-        #     # Compute pseudo-inverse for residual minimization
-        #     H_pinv = np.linalg.pinv(H)
-            
-        #     # Project attack back to null space of measurement residual
-        #     residual_projection = H @ H_pinv @ attack_vector
-        #     null_space_component = attack_vector - residual_projection
-            
-        #     # Keep some residual projection for undetectability, add null space for stealth
-        #     stealthy_attack = 0.7 * residual_projection + 0.3 * null_space_component
-            
-        #     # Final subtle perturbation to break perfect patterns
-        #     perturbation = np.random.normal(0, attack_magnitude * 0.1, size=stealthy_attack.shape)
-        #     attack_vector = stealthy_attack + perturbation
-            
-        # except np.linalg.LinAlgError:
-        #     # Fallback: just add subtle perturbation
-        #     perturbation = np.random.normal(0, attack_magnitude * 0.1, size=attack_vector.shape)
-        #     attack_vector += perturbation
         
         attack_info = {
             'attack_magnitude': np.linalg.norm(c),
@@ -316,9 +248,7 @@ class StateEstimationFDIA:
             
         return measurements + attack_vector
 
-def simulate_timestep(timestep, fdia_generator, measurement_history=None):
-    """Simulate single timestep with optional adaptive FDIA attack"""
-    
+def simulate_timestep(timestep, fdia_generator, measurement_history=None):    
     if measurement_history is None:
         measurement_history = []
     
@@ -331,10 +261,6 @@ def simulate_timestep(timestep, fdia_generator, measurement_history=None):
     # Base daily cycle (sinusoidal with minimum at 4 AM, maximum at 2 PM)
     base_cycle = 0.7 + 0.2 * np.sin(2 * np.pi * (hour_of_day - 4) / 24)
     
-    # Weekend effect (slightly lower peaks, later morning peak)
-    day_of_week = (timestep // 24) % 7
-    
-    # Combine all factors
     daily_factor = (base_cycle + morning_peak + evening_peak)
     
     load_factor = 0.75 * daily_factor
@@ -352,35 +278,28 @@ def simulate_timestep(timestep, fdia_generator, measurement_history=None):
     
     z_normal, H = fdia_generator.generate_measurements(state_vector, add_noise=True)
     
-    # Store measurement history for adaptive attacks
     measurement_history.append(z_normal.copy())
-    if len(measurement_history) > 20:  # Keep rolling window of 20 measurements
+    if len(measurement_history) > 20:
         measurement_history.pop(0)
     
-    # === ADVANCED ATTACK LOGIC ===
-    # Adaptive attack probability based on system state
     base_attack_prob = CONFIG['fdia_probability']
     
-    # Increase attack probability during high-variation periods (natural camouflage)
     if len(measurement_history) >= 3:
         recent_variance = np.var([measurement_history[-1], measurement_history[-2], measurement_history[-3]], axis=0)
-        high_variance_bonus = np.mean(recent_variance) * 100  # Scale variance influence
+        high_variance_bonus = np.mean(recent_variance) * 100 
         adaptive_attack_prob = base_attack_prob * (1 + high_variance_bonus)
     else:
         adaptive_attack_prob = base_attack_prob
     
-    # Reduce attack probability during very stable periods
     if load_factor < 0.6 or (2 <= hour_of_day <= 6):  # Low activity periods
         adaptive_attack_prob *= 0.3
         
-    adaptive_attack_prob = np.clip(adaptive_attack_prob, 0.005, 0.15)  # Reasonable bounds
+    adaptive_attack_prob = np.clip(adaptive_attack_prob, 0.005, 0.15)
     
     has_attack = np.random.random() < adaptive_attack_prob
     
     if has_attack:
-        attack_vector, attack_info = fdia_generator.generate_fdia_attack_vector(
-            H, timestep=timestep, load_factor=load_factor, measurement_history=measurement_history
-        )
+        attack_vector, attack_info = fdia_generator.generate_fdia_attack_vector(H, timestep=timestep, load_factor=load_factor, measurement_history=measurement_history)
         
         z_attacked = fdia_generator.apply_fdia_attack(z_normal, attack_vector)
         
@@ -392,7 +311,6 @@ def simulate_timestep(timestep, fdia_generator, measurement_history=None):
         attack_magnitude = 0.0
         attack_info = {'attack_type': 'none'}
     
-    # Create record
     record = {
         'timestep': timestep,
         'hour_of_day': timestep % 24,
@@ -411,28 +329,17 @@ def simulate_timestep(timestep, fdia_generator, measurement_history=None):
     
     return record
 
-# === MAIN EXECUTION ===
 if __name__ == "__main__":
     dss.Basic.ClearAll()
 
     try:
         dss.Command(r"Redirect data/raw/IEEE13Nodeckt.dss")
-        print("IEEE 13-bus system loaded successfully")
     except Exception as e:
         print(f"Failed to load IEEE 13-bus system: {e}")
         raise
 
     num_buses = dss.Circuit.NumBuses()
-    print(f"System verified: {num_buses} buses")
-
-    if num_buses == 0:
-        raise ValueError("No buses found - check DSS file")
-
     fdia_generator = StateEstimationFDIA(n_buses=num_buses)
-
-    print(f"\nStarting Advanced FDIA simulation with adaptive stealth attacks")
-    print(f"Generating {CONFIG['n_timesteps']} timesteps with {CONFIG['fdia_probability']*100:.1f}% base FDIA probability")
-    print(f"Features: Time-aware attacks, measurement camouflage, strategic state targeting")
 
     records = []
     attack_count = 0
@@ -445,11 +352,6 @@ if __name__ == "__main__":
             records.append(record)
             if record['fdia_label'] == 1:
                 attack_count += 1
-                
-        # Progress indicator
-        if t % 1000 == 0:
-            current_attack_rate = (attack_count / (t + 1)) * 100 if t > 0 else 0
-            print(f"Progress: {t}/{CONFIG['n_timesteps']} ({t/CONFIG['n_timesteps']*100:.1f}%) - Attack rate: {current_attack_rate:.2f}%")
 
     df = pd.DataFrame(records)
 

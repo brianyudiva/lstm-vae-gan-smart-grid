@@ -40,7 +40,6 @@ def build_lstm_vae_gan_regular(input_shape, latent_dim=8):
         recurrent_dropout=dropout_rate
     )(x)
     
-    # VAE outputs
     z_mean = layers.Dense(latent_dim, name='z_mean', kernel_regularizer=l1_l2(l1_reg, l2_reg))(x)
     z_log_var = layers.Dense(latent_dim, name='z_log_var', kernel_regularizer=l1_l2(l1_reg, l2_reg))(x)
     z = sampling_layer(z_mean, z_log_var, 'sampling')
@@ -50,10 +49,8 @@ def build_lstm_vae_gan_regular(input_shape, latent_dim=8):
     # === DECODER ===
     decoder_input = layers.Input(shape=(latent_dim,))
     
-    # Larger decoding path
     x = layers.RepeatVector(input_shape[0])(decoder_input)
     
-    # Multi-layer LSTM decoder
     x = layers.LSTM(
         8, 
         return_sequences=True,
@@ -78,7 +75,6 @@ def build_lstm_vae_gan_regular(input_shape, latent_dim=8):
     # === DISCRIMINATOR ===
     discriminator_input = layers.Input(shape=input_shape)
     
-    # Final classification layers
     x = layers.Dense(16, activation='relu', kernel_regularizer=l1_l2(l1_reg/10, l2_reg/10))(discriminator_input)
     x = layers.Dropout(0.2)(x)
     x = layers.Dense(8, activation='relu', kernel_regularizer=l1_l2(l1_reg/10, l2_reg/10))(x)

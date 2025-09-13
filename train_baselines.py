@@ -4,10 +4,9 @@ from tensorflow import keras
 import json
 import os
 from datetime import datetime
-from sklearn.metrics import accuracy_score, average_precision_score
+from sklearn.metrics import average_precision_score
 from models.baseline_models import get_baseline_model
-from utils.loss_functions import beta_schedule, kl_loss, regularization_loss, robust_reconstruction_loss, vae_loss, combined_loss, wasserstein_loss
-from utils.utils import create_anomaly_labels
+from utils.loss_functions import beta_schedule, kl_loss, regularization_loss, robust_reconstruction_loss, vae_loss
 
 
 def evaluate_model(model, X_test, y_test):
@@ -24,7 +23,6 @@ def evaluate_model(model, X_test, y_test):
     
     pr_auc = average_precision_score(y_test, recon_errors)
 
-    # Calculate mean reconstruction error for normal data
     normal_recon_error = np.mean(recon_errors[y_test == 0])
     
     return pr_auc, normal_recon_error
@@ -115,9 +113,9 @@ def train_lstm_autoencoder(X_train, X_test, y_test, params, epochs=50, batch_siz
                 best_recon_error = recon_error
                 patience_counter = 0
 
-                autoencoder.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/lstm_autoencoder_full.h5')
-                encoder.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/lstm_autoencoder_encoder.h5')
-                decoder.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/lstm_autoencoder_decoder.h5')
+                autoencoder.save('/outputs/checkpoints/lstm_autoencoder_full.h5')
+                encoder.save('/outputs/checkpoints/lstm_autoencoder_encoder.h5')
+                decoder.save('/outputs/checkpoints/lstm_autoencoder_decoder.h5')
             else:
                 patience_counter += 5
             
@@ -174,7 +172,6 @@ def train_vae_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
     best_epoch = 0
     patience_counter = 0
     
-    # Add missing training parameters
     kl_weight = 1.0
     beta_warmup_epochs = epochs // 4
     reconstruction_weight = 1.0
@@ -184,7 +181,7 @@ def train_vae_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
         epoch_vae_losses = []
         epoch_disc_losses = []
         
-        for step in range(steps_per_epoch):
+        for _ in range(steps_per_epoch):
             batch_idx = np.random.randint(0, X_train.shape[0], batch_size)
             batch_x = X_train[batch_idx]
 
@@ -214,7 +211,6 @@ def train_vae_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
                 
                 recon_loss_val = robust_reconstruction_loss(batch_x, reconstructed)
                 
-                # Gradual KL weight increase (beta-VAE approach)
                 kl_beta = beta_schedule(epoch, epochs, 
                                         max_beta=kl_weight, 
                                         warmup_epochs=beta_warmup_epochs)
@@ -229,18 +225,16 @@ def train_vae_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
                 gen_loss = (reconstruction_weight * recon_loss_val +
                             kl_loss_val +
                             regularization_weight * reg_loss_val +
-                            0.1 * adversarial_loss)  # Small adversarial weight to start
+                            0.1 * adversarial_loss)
                 
             gen_grads = gen_tape.gradient(gen_loss, encoder.trainable_weights + decoder.trainable_weights)
             if gen_grads:
                 gen_grads = [tf.clip_by_norm(g, 1.0) for g in gen_grads]
                 gen_optimizer.apply_gradients(zip(gen_grads, encoder.trainable_weights + decoder.trainable_weights))
             
-            # Track losses
             epoch_vae_losses.append(float(gen_loss.numpy()))
             epoch_disc_losses.append(float(disc_loss.numpy()))
         
-        # Calculate average losses for this epoch
         avg_vae_loss = np.mean(epoch_vae_losses)
         avg_disc_loss = np.mean(epoch_disc_losses)
         vae_losses.append(avg_vae_loss)
@@ -256,10 +250,10 @@ def train_vae_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
                 best_epoch = epoch
                 patience_counter = 0
 
-                encoder.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/vae_gan_encoder.h5')
-                decoder.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/vae_gan_decoder.h5')
-                discriminator.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/vae_gan_discriminator.h5')
-                vae.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/vae_gan_full.h5')
+                encoder.save('/outputs/checkpoints/vae_gan_encoder.h5')
+                decoder.save('/outputs/checkpoints/vae_gan_decoder.h5')
+                discriminator.save('/outputs/checkpoints/vae_gan_discriminator.h5')
+                vae.save('/outputs/checkpoints/vae_gan_full.h5')
                 print(f"Model saved! PR-AUC: {pr_auc:.4f}, Recon Error: {recon_error:.6f}")
             else:
                 patience_counter += 5
@@ -321,22 +315,17 @@ def train_lstm_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
             
             # === Train Generator (Autoencoder) ===
             with tf.GradientTape() as gen_tape:
-                # Get latent representation
                 latent = encoder(batch_x, training=True)
-                if isinstance(latent, list):  # Handle VAE-style encoder output
+                if isinstance(latent, list):
                     latent = latent[2] if len(latent) > 2 else latent[0]
                 
-                # Reconstruct data
                 reconstructed = decoder(latent, training=True)
                 
-                # Reconstruction loss
                 gen_loss = tf.reduce_mean(tf.keras.losses.mse(batch_x, reconstructed))
                 
-                # Add regularization
                 reg_loss = regularization_loss(encoder, decoder)
                 gen_loss += 0.01 * reg_loss
             
-            # Apply generator gradients
             gen_grads = gen_tape.gradient(gen_loss, encoder.trainable_weights + decoder.trainable_weights)
             if gen_grads:
                 gen_grads = [tf.clip_by_norm(g, 1.0) for g in gen_grads]
@@ -344,12 +333,10 @@ def train_lstm_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
             
             # === Train Discriminator ===
             with tf.GradientTape() as disc_tape:
-                # Real data through discriminator
                 real_pred = discriminator(batch_x, training=True)
                 real_labels = tf.ones_like(real_pred)
                 real_loss = tf.keras.losses.binary_crossentropy(real_labels, real_pred)
                 
-                # Fake data through discriminator
                 latent = encoder(batch_x, training=False)
                 if isinstance(latent, list):
                     latent = latent[2] if len(latent) > 2 else latent[0]
@@ -360,13 +347,11 @@ def train_lstm_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
                 
                 disc_loss = tf.reduce_mean(real_loss + fake_loss)
             
-            # Apply discriminator gradients
             disc_grads = disc_tape.gradient(disc_loss, discriminator.trainable_weights)
             if disc_grads:
                 disc_grads = [tf.clip_by_norm(g, 1.0) for g in disc_grads]
                 disc_optimizer.apply_gradients(zip(disc_grads, discriminator.trainable_weights))
             
-            # Track losses
             epoch_gen_losses.append(float(gen_loss.numpy()))
             epoch_disc_losses.append(float(disc_loss.numpy()))
         
@@ -385,11 +370,11 @@ def train_lstm_gan(X_train, X_test, y_test, params, epochs=50, batch_size=32):
                 best_epoch = epoch
                 patience_counter = 0
 
-                encoder.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/lstm_gan_encoder.h5')
-                decoder.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/lstm_gan_decoder.h5')
-                discriminator.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/lstm_gan_discriminator.h5')
-                generator.save('/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/lstm_gan_generator.h5')
-                print(f"  🎯 Model saved! PR-AUC: {pr_auc:.4f}, Recon Error: {recon_error:.6f}")
+                encoder.save('/outputs/checkpoints/lstm_gan_encoder.h5')
+                decoder.save('/outputs/checkpoints/lstm_gan_decoder.h5')
+                discriminator.save('/outputs/checkpoints/lstm_gan_discriminator.h5')
+                generator.save('/outputs/checkpoints/lstm_gan_generator.h5')
+                print(f"  Model saved! PR-AUC: {pr_auc:.4f}, Recon Error: {recon_error:.6f}")
             else:
                 patience_counter += 5
             
@@ -450,7 +435,7 @@ def main():
                 'completed_at': datetime.now().isoformat()
             }
     
-    summary_path = '/home/brianyudiva/Documents/Project/lstm-vae-gan-smart-grid/outputs/checkpoints/baseline_training_summary.json'
+    summary_path = 'outputs/checkpoints/baseline_training_summary.json'
     with open(summary_path, 'w') as f:
         json.dump(training_results, f, indent=2, default=str)
     

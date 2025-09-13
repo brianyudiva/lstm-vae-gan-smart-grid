@@ -7,7 +7,7 @@ from utils.loss_functions import (
 import os
 import json
 from datetime import datetime
-from sklearn.metrics import average_precision_score, accuracy_score
+from sklearn.metrics import average_precision_score
 from utils.utils import convert_to_json_serializable
 
 def train_model():    
@@ -92,8 +92,8 @@ def train_model():
                 real_labels = tf.ones_like(real_pred)
                 real_loss = tf.keras.losses.binary_crossentropy(real_labels, real_pred)
                 
-                z_mean, z_log_var, z = encoder(normal_batch, training=False)  # Don't update encoder during disc training
-                fake_batch = decoder(z, training=False)  # Don't update decoder during disc training
+                z_mean, z_log_var, z = encoder(normal_batch, training=False)
+                fake_batch = decoder(z, training=False)
                 fake_pred = discriminator(fake_batch, training=True)
                 fake_labels = tf.zeros_like(fake_pred)
                 fake_loss = tf.keras.losses.binary_crossentropy(fake_labels, fake_pred)
@@ -107,14 +107,11 @@ def train_model():
             
             # === TRAIN GENERATOR ===
             with tf.GradientTape() as gen_tape:
-                # Forward pass through LSTM-VAE
                 z_mean, z_log_var, z = encoder(normal_batch, training=True)
                 reconstructed = decoder(z, training=True)
                 
-                # LSTM-VAE losses
                 recon_loss_val = robust_reconstruction_loss(normal_batch, reconstructed)
                 
-                # Gradual KL weight increase (beta-VAE approach)
                 kl_beta = beta_schedule(epoch, epochs, 
                                         max_beta=params['kl_weight'], 
                                         warmup_epochs=params['beta_warmup_epochs'])
@@ -122,18 +119,15 @@ def train_model():
                 
                 reg_loss_val = regularization_loss(encoder, decoder)
                 
-                # Adversarial loss (try to fool discriminator)
-                gen_pred = discriminator(reconstructed, training=False)  # Don't update discriminator during gen training
-                gen_labels = tf.ones_like(gen_pred)  # Generator wants discriminator to think fake is real
+                gen_pred = discriminator(reconstructed, training=False)
+                gen_labels = tf.ones_like(gen_pred)
                 adversarial_loss = tf.reduce_mean(tf.keras.losses.binary_crossentropy(gen_labels, gen_pred))
                 
-                # Total generator loss (LSTM-VAE + Adversarial)
                 gen_loss = (params['reconstruction_weight'] * recon_loss_val +
                             kl_loss_val +
                             params['regularization_weight'] * reg_loss_val +
-                            0.1 * adversarial_loss)  # Small adversarial weight to start
+                            0.1 * adversarial_loss)
                 
-                # Update generator (LSTM encoder + LSTM decoder)
                 gen_grads = gen_tape.gradient(gen_loss, encoder.trainable_weights + decoder.trainable_weights)
                 if gen_grads:
                     gen_grads = [tf.clip_by_norm(g, 1.0) for g in gen_grads]
@@ -161,15 +155,12 @@ def train_model():
         reconstructed_test = decoder(z_test_enc)
         recon_errors = tf.reduce_mean(tf.square(X_test - reconstructed_test), axis=[1, 2]).numpy()
         
-        # Separation analysis
         normal_errors = recon_errors[y_test == 0]
         attack_errors = recon_errors[y_test == 1]
         separation_ratio = float(np.mean(attack_errors) / np.mean(normal_errors))
         
-        # Performance metrics
         pr_auc = float(average_precision_score(y_test, recon_errors))
         
-        # Normal data reconstruction quality (should be low)
         normal_recon_quality = float(np.mean(normal_errors))
         attack_recon_quality = float(np.mean(attack_errors))
         
@@ -178,7 +169,6 @@ def train_model():
         print(f"  Separation ratio: {separation_ratio:.3f}x")
         print(f"  PR AUC: {pr_auc:.3f}")
         
-        # Store epoch results
         epoch_result = {
             'epoch': epoch + 1,
             'losses': {k: float(v) for k, v in epoch_losses.items()},
@@ -210,7 +200,6 @@ def train_model():
     training_stats['total_epochs'] = epoch + 1
     training_stats['early_stopped'] = wait >= patience
     
-    # Save training statistics
     serializable_stats = convert_to_json_serializable(training_stats)
     
     with open(f"{output_path}/{model_prefix}_stats.json", 'w') as f:
@@ -219,10 +208,9 @@ def train_model():
     print(f"\n" + "="*60)
     print(f"TRAINING COMPLETED!")
     print(f"="*60)
-    # print(f"🎯 Best Accuracy: {best_t_separation_ratio:.3f}x")
-    print(f"📈 Best PR-AUC: {best_pr_auc:.3f}")
-    print(f"⏱️  Total Epochs: {epoch + 1}")
-    print(f"💾 Model saved as: {model_prefix}_[encoder/decoder/discriminator].h5")
+    print(f"Best PR-AUC: {best_pr_auc:.3f}")
+    print(f"Total Epochs: {epoch + 1}")
+    print(f"Model saved as: {model_prefix}_[encoder/decoder/discriminator].h5")
     
     return encoder, decoder, training_stats
 
